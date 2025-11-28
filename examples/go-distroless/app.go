@@ -1,4 +1,3 @@
-package godistroless
 package main
 
 import (

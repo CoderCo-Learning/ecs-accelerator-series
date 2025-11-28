@@ -108,3 +108,49 @@ run-go-chi:
 	docker run -p 9000:9000 go-chi
 test-go-chi:
 	curl -X GET http://localhost:9000/hello
+
+
+##### LIVE APPS #####
+
+build-hackernews:
+	docker build -t hackernews ./live/hackernews
+run-hackernews:
+	docker run -p 5001:5000 hackernews
+
+build-it-tools:
+	docker build -t it-tools ./live/it-tools
+run-it-tools:
+	docker run -p 5002:80 it-tools
+
+### ALL
+
+# build-all:
+# 	for dir in examples/*; do \
+# 		if [ -f $$dir/Dockerfile ]; then \
+# 			name=$$(basename $$dir); \
+# 			echo "🔨 Building $$name..."; \
+# 			docker build -t $$name $$dir; \
+# 		fi \
+# 	done
+
+
+build-all:
+	$(MAKE) -j 8 \
+		build-go-basic \
+		build-go-scratch \
+		build-go-distroless \
+		build-node-basic \
+		build-node-prod \
+		build-python-basic \
+		build-python-slim \
+		build-python-distroless \
+		build-static \
+		build-bash \
+		build-java \
+		build-csharp \
+		build-php \
+		build-flask-todo \
+		build-go-chi
+
+prune-all:
+	docker system prune -a

@@ -138,7 +138,7 @@ make run-java
 curl localhost:8084
 ```
 
-<!-- ## C# .NET
+## C# .NET
 ```
 make build-csharp
 make run-csharp
@@ -148,7 +148,7 @@ make run-csharp
 ```
 make build-php
 make run-php
-``` -->
+```
 
 ## Flask ToDo App (Open Source)
 ```
