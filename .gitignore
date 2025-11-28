@@ -1,0 +1,12 @@
+.env
+.DS_Store
+
+## terraform
+**/*.tfstate
+**/*.tfstate.*
+**/*.tfplan
+**/*.tfplan.*
+**/*.tfstate.backup
+**/*.tfstate.backup.*
+**/*.tfplan.backup
+**/*.tfplan.backup.*
