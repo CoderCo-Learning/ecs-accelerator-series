@@ -13,7 +13,7 @@ RUN <install command>
 # 5. Copy the rest
 COPY . .
 
-# 6. Expose a port (optional)
+# 6. Expose a port (optional) - this is just for docs, remember...
 EXPOSE <port>
 
 # 7. Run the app
