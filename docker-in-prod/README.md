@@ -68,6 +68,8 @@ Shows full build logs.
 
 Ignores CMD/ENTRYPOINT → gives you access to debug.
 
+- MINI DEMO!
+
 ## 2. What makes a good production-like Dockerfile?
 
 These are my 3 core principles for writing production-like Dockerfiles:
