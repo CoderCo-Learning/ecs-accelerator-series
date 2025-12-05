@@ -6,7 +6,10 @@ A Flask app designed to demonstrate Docker debugging techniques.
 
 ```bash
 docker build -t debug-demo:latest ./debug-app
-docker run -d --name debug-demo -p 5000:5000 debug-demo:latest
+docker run -d --name debug-demo -p 8080:8080 debug-demo:latest
+
+## on new term, run sim.sh
+sh sim.sh
 ```
 
 ## Manual Debugging Commands
@@ -17,7 +20,7 @@ docker run -d --name debug-demo -p 5000:5000 debug-demo:latest
 # See every build step clearly
 docker build --progress=plain -t debug-demo:latest .
 
-# Build without cache (force rebuild)
+# Build without cache (force rebuild)... in case we change something and want to quickly rebuild ineh.
 docker build --no-cache -t debug-demo:latest .
 ```
 
@@ -77,6 +80,7 @@ docker exec debug-demo cat /app/app.py
 
 # as root user (if needed for debugging)
 docker exec -u root -it debug-demo sh
+whoami # check if we are root now...
 ```
 
 ### 6. Inspect Container Metadata
@@ -174,6 +178,8 @@ docker cp local-file.txt debug-demo:/tmp/
 ```bash
 # Export to tar
 docker export debug-demo > container.tar
+## if you want to export the container as a new image, you can do:
+docker commit debug-demo debug-demo:latest
 
 # Or pipe directly
 docker export debug-demo | tar tv | grep app
@@ -196,22 +202,22 @@ docker inspect debug-demo | jq -r '.[0].NetworkSettings.IPAddress'
 
 ```bash
 # Home - generates normal logs
-curl http://localhost:5000/
+curl http://localhost:8080/
 
 # Health check - sometimes fails after 60s
-curl http://localhost:5000/health
+curl http://localhost:8080/health
 
 # Crash - generates error logs
-curl http://localhost:5000/crash
+curl http://localhost:8080/crash
 
 # Slow - tests timeouts
-curl http://localhost:5000/slow?delay=10
+curl http://localhost:8080/slow?delay=10
 
 # Environment vars
-curl http://localhost:5000/env
+curl http://localhost:8080/env
 
 # List files
-curl http://localhost:5000/files
+curl http://localhost:8080/files
 ```
 
 ## Common Debugging Scenarios
@@ -276,7 +282,7 @@ docker exec debug-demo ls -la /app
 docker exec -u root -it debug-demo sh
 ```
 
-### Network Issues
+### Network troubleshooting
 
 ```bash
 # Check IP address
@@ -290,37 +296,6 @@ docker exec debug-demo wget -O- http://localhost:5000
 
 # Test DNS
 docker exec debug-demo nslookup google.com
-```
-
-### Build Failures
-
-```bash
-# Build with full output
-docker build --progress=plain -t debug-demo:latest .
-
-# Build without cache
-docker build --no-cache -t debug-demo:latest .
-
-# Build specific stage (multi-stage)
-docker build --target builder -t debug-demo:builder .
-```
-
-## Advanced Debugging
-
-### Live File Editing
-
-```bash
-# Copy file out
-docker cp debug-demo:/app/app.py ./app.py
-
-# Edit locally
-vim app.py
-
-# Copy back
-docker cp ./app.py debug-demo:/app/app.py
-
-# Restart (if needed)
-docker restart debug-demo
 ```
 
 ### Attach to Container
@@ -345,14 +320,29 @@ docker events --filter container=debug-demo
 ### System Diagnostics
 
 ```bash
-# Disk usage
+# disk usage
 docker system df
 
-# Detailed disk usage
+# detailed disk usage
 docker system df -v
 
-# Prune unused resources
+# prune unused resources
 docker system prune
+
+docker system prune -a --volumes -f
+## I love using this command to clean up my system and free up space.
+### Deletes everything Docker isn’t using
+## - stopped containers
+## - unused images
+## - unused networks
+## - build cache
+
+## -a > also remove all unused images, not just dangling ones
+
+# --volumes > remove unused volumes (can delete data!)
+
+# -f > run without asking for confirmation
+
 ```
 
 ## Cleanup
@@ -375,11 +365,11 @@ docker system prune -a --volumes
 
 When container fails:
 
-1. ✅ Check if running: `docker ps -a`
-2. ✅ Check logs: `docker logs <container>`
-3. ✅ Check health: `docker inspect <container> | jq '.[0].State.Health'`
-4. ✅ Test with shell: `docker run --rm -it --entrypoint sh <image>`
-5. ✅ Check resources: `docker stats --no-stream <container>`
-6. ✅ Inspect metadata: `docker inspect <container> | jq`
-7. ✅ Check processes: `docker top <container>`
-8. ✅ Rebuild clean: `docker build --no-cache -t <image> .`
+1. Check if running: `docker ps -a`
+2. Check logs: `docker logs <container>`
+3. Check health: `docker inspect <container> | jq '.[0].State.Health'`
+4. Test with shell: `docker run --rm -it --entrypoint sh <image>`
+5. Check resources: `docker stats --no-stream <container>`
+6. Inspect metadata: `docker inspect <container> | jq`
+7. Check processes: `docker top <container>`
+8. Rebuild clean: `docker build --no-cache -t <image> .`

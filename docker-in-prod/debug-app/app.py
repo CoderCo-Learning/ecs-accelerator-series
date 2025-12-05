@@ -92,4 +92,4 @@ if __name__ == '__main__':
     logger.info(f"Environment: {os.getenv('FLASK_ENV', 'production')}")
     logger.info(f"Log level: {os.getenv('LOG_LEVEL', 'INFO')}")
     
-    app.run(host='0.0.0.0', port=5000, debug=False)
+    app.run(host='0.0.0.0', port=8080, debug=False)

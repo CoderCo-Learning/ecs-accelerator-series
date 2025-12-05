@@ -15,7 +15,7 @@ HEALTHCHECK --interval=10s --timeout=3s --start-period=5s --retries=3 \
   CMD ./healthcheck.sh
 
 USER app
-EXPOSE 5000
+EXPOSE 8080
 
 ENV FLASK_ENV=production \
     LOG_LEVEL=INFO \
