@@ -1,0 +1,19 @@
+name: scfdemo
+
+deployment:
+  type: awsApi@1.0
+  # region: eu-west-2 ## not allowed
+
+containers:
+  api:
+    src: ./service
+
+    routing:
+      pathPattern: /*
+      pathHealthCheck: /health
+
+    environment:
+      ENV: production
+
+    compute:
+      type: awsFargateEcs

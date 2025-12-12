@@ -2,6 +2,7 @@
 .DS_Store
 
 ## terraform
+**terraform**
 **/*.tfstate
 **/*.tfstate.*
 **/*.tfplan
@@ -10,6 +11,7 @@
 **/*.tfstate.backup.*
 **/*.tfplan.backup
 **/*.tfplan.backup.*
+
 
 
 # Byte-compiled / optimized / DLL files
