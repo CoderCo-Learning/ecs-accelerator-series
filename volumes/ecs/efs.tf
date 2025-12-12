@@ -88,6 +88,9 @@ resource "aws_ecs_task_definition" "app_with_efs" {
     merge(
       jsondecode(data.aws_ecs_task_definition.existing.container_definitions)[0],
       {
+        linuxParameters = {
+          initProcessEnabled = true
+        }
         mountPoints = [
           {
             sourceVolume  = "efs-storage"
@@ -114,15 +117,35 @@ resource "aws_ecs_task_definition" "app_with_efs" {
 resource "null_resource" "update_service" {
   triggers = {
     task_definition = aws_ecs_task_definition.app_with_efs.arn
+    timestamp       = timestamp() # Forces run every time
   }
 
   provisioner "local-exec" {
     command = <<-EOT
+      echo "Waiting for EFS mount targets to be available..."
+      
+      # Wait for all mount targets to be available
+      for i in {1..30}; do
+        STATUS=$(aws efs describe-mount-targets \
+          --file-system-id ${aws_efs_file_system.app_efs.id} \
+          --region us-east-1 \
+          --query "MountTargets[?LifeCycleState!='available'] | length(@)")
+        
+        if [ "$STATUS" == "0" ]; then
+          echo "All mount targets available"
+          break
+        fi
+        
+        echo "Waiting for mount targets... ($i/30)"
+        sleep 10
+      done
+      
       aws ecs update-service \
         --region us-east-1 \
         --cluster ${data.aws_ecs_cluster.existing.cluster_name} \
         --service ${data.aws_ecs_service.existing.service_name} \
         --task-definition ${aws_ecs_task_definition.app_with_efs.arn} \
+        --enable-execute-command \
         --force-new-deployment
     EOT
   }

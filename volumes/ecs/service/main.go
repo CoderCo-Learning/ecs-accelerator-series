@@ -1,125 +1,176 @@
 package main
 
 import (
+	"embed"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 )
 
-const volumePath = "/mnt/efs"
+//go:embed static/*
+var staticFiles embed.FS
+
+const (
+	volumePath    = "/mnt/efs"
+	maxUploadSize = 10 << 20
+	uploadsDir    = "/mnt/efs/uploads"
+)
+
+func init() {
+	// Create uploads directory on startup
+	if err := os.MkdirAll(uploadsDir, 0755); err != nil {
+		log.Printf("Failed to create uploads directory: %v", err)
+	} else {
+		log.Println("Uploads directory ready")
+	}
+}
 
 func main() {
-	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintln(w, "ok")
-	})
+	// Serve embedded static files
+	http.Handle("/static/", http.FileServer(http.FS(staticFiles)))
 
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintln(w, "Hello from ECS Fargate via Serverless Containers!")
-	})
-
-	// Write to EFS
-	http.HandleFunc("/write", func(w http.ResponseWriter, r *http.Request) {
-		message := r.URL.Query().Get("msg")
-		if message == "" {
-			message = "default message"
-		}
-
-		filename := fmt.Sprintf("%s/message-%d.txt", volumePath, time.Now().Unix())
-		err := os.WriteFile(filename, []byte(message), 0644)
-		if err != nil {
-			http.Error(w, fmt.Sprintf("failed to write: %v", err), http.StatusInternalServerError)
-			return
-		}
-
-		hostname, _ := os.Hostname()
-		fmt.Fprintf(w, "wrote to %s from task %s\n", filename, hostname)
-	})
-
-	// Read from EFS
-	http.HandleFunc("/read", func(w http.ResponseWriter, r *http.Request) {
-		entries, err := os.ReadDir(volumePath)
-		if err != nil {
-			http.Error(w, fmt.Sprintf("failed to read dir: %v", err), http.StatusInternalServerError)
-			return
-		}
-
-		hostname, _ := os.Hostname()
-		fmt.Fprintf(w, "Files in EFS (reading from task %s):\n", hostname)
-
-		if len(entries) == 0 {
-			fmt.Fprintln(w, "  (no files yet)")
-			return
-		}
-
-		for _, entry := range entries {
-			filepath := fmt.Sprintf("%s/%s", volumePath, entry.Name())
-			content, err := os.ReadFile(filepath)
-			if err != nil {
-				fmt.Fprintf(w, "  %s (error reading)\n", entry.Name())
-				continue
-			}
-			fmt.Fprintf(w, "  %s: %s\n", entry.Name(), string(content))
-		}
-	})
-
-	// List task info
-	http.HandleFunc("/info", func(w http.ResponseWriter, r *http.Request) {
-		hostname, _ := os.Hostname()
-		fmt.Fprintf(w, "Task ID: %s\n", hostname)
-		fmt.Fprintf(w, "EFS mount: %s\n", volumePath)
-
-		// Check if EFS is mounted
-		stat, err := os.Stat(volumePath)
-		if err != nil {
-			fmt.Fprintf(w, "EFS status: NOT MOUNTED (%v)\n", err)
-		} else if stat.IsDir() {
-			fmt.Fprintln(w, "EFS status: MOUNTED ✓")
-		}
-	})
-
-	http.HandleFunc("/delete", func(w http.ResponseWriter, r *http.Request) {
-		filename := r.URL.Query().Get("file")
-		if filename == "" {
-			http.Error(w, "missing file parameter", http.StatusBadRequest)
-			return
-		}
-
-		filepath := fmt.Sprintf("%s/%s", volumePath, filename)
-		err := os.Remove(filepath)
-		if err != nil {
-			http.Error(w, fmt.Sprintf("failed to delete: %v", err), http.StatusInternalServerError)
-			return
-		}
-
-		hostname, _ := os.Hostname()
-		fmt.Fprintf(w, "deleted %s from task %s\n", filename, hostname)
-	})
-
-	http.HandleFunc("/stats", func(w http.ResponseWriter, r *http.Request) {
-		entries, _ := os.ReadDir(volumePath)
-		var totalSize int64
-		for _, entry := range entries {
-			info, err := entry.Info()
-			if err == nil {
-				totalSize += info.Size()
-			}
-		}
-
-		hostname, _ := os.Hostname()
-		fmt.Fprintf(w, "Task: %s\n", hostname)
-		fmt.Fprintf(w, "Files: %d\n", len(entries))
-		fmt.Fprintf(w, "Total size: %d bytes\n", totalSize)
-	})
-
-	http.HandleFunc("/crash", func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintln(w, "crashing in 2 seconds...")
-		go func() {
-			time.Sleep(2 * time.Second)
-			os.Exit(1)
-		}()
+	http.HandleFunc("/", serveIndex)
+	http.HandleFunc("/health", healthHandler)
+	http.HandleFunc("/api/info", apiInfoHandler)
+	http.HandleFunc("/api/files", filesHandler)
+	http.HandleFunc("/api/upload", uploadHandler)
+	http.HandleFunc("/api/delete", deleteHandler)
 
 	log.Println("starting server on :8080")
 	http.ListenAndServe(":8080", nil)
+}
+
+func serveIndex(w http.ResponseWriter, r *http.Request) {
+	data, _ := staticFiles.ReadFile("static/index.html")
+	w.Header().Set("Content-Type", "text/html")
+	w.Write(data)
+}
+
+func healthHandler(w http.ResponseWriter, r *http.Request) {
+	fmt.Fprintln(w, "ok")
+}
+
+func checkEFSMounted() string {
+	if stat, err := os.Stat(uploadsDir); err == nil && stat.IsDir() {
+		return "MOUNTED ✓"
+	}
+	return "NOT MOUNTED"
+}
+
+func apiInfoHandler(w http.ResponseWriter, r *http.Request) {
+	hostname, _ := os.Hostname()
+
+	// More robust EFS mount check
+	mounted := checkEFSMounted()
+
+	w.Header().Set("Content-Type", "application/json")
+	fmt.Fprintf(w, `{"taskId":"%s","efsMount":"%s","efsStatus":"%s"}`,
+		hostname, volumePath, mounted)
+}
+
+func filesHandler(w http.ResponseWriter, r *http.Request) {
+	entries, err := os.ReadDir(uploadsDir)
+	if err != nil {
+		// Directory doesn't exist - return empty array instead of crashing
+		hostname, _ := os.Hostname()
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"taskId":"%s","files":[]}`, hostname)
+		return
+	}
+
+	hostname, _ := os.Hostname()
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Write([]byte(`{"taskId":"` + hostname + `","files":[`))
+
+	first := true
+	for _, entry := range entries {
+		// Skip hidden files
+		if strings.HasPrefix(entry.Name(), ".") {
+			continue
+		}
+
+		info, _ := entry.Info()
+		if !first {
+			w.Write([]byte(","))
+		}
+		first = false
+		fmt.Fprintf(w, `{"name":"%s","size":%d,"modified":"%s"}`,
+			entry.Name(), info.Size(), info.ModTime().Format(time.RFC3339))
+	}
+
+	w.Write([]byte(`]}`))
+}
+
+func uploadHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, maxUploadSize)
+	if err := r.ParseMultipartForm(maxUploadSize); err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"file too large"}`, err), http.StatusBadRequest)
+		return
+	}
+
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"%v"}`, err), http.StatusBadRequest)
+		return
+	}
+	defer file.Close()
+
+	// Sanitise filename
+	filename := filepath.Base(header.Filename)
+	filename = strings.ReplaceAll(filename, " ", "_")
+
+	// Add timestamp to avoid collisions
+	ext := filepath.Ext(filename)
+	nameWithoutExt := strings.TrimSuffix(filename, ext)
+	finalName := fmt.Sprintf("%s_%d%s", nameWithoutExt, time.Now().Unix(), ext)
+
+	dst, err := os.Create(filepath.Join(uploadsDir, finalName))
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"%v"}`, err), http.StatusInternalServerError)
+		return
+	}
+	defer dst.Close()
+
+	if _, err := io.Copy(dst, file); err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"%v"}`, err), http.StatusInternalServerError)
+		return
+	}
+
+	hostname, _ := os.Hostname()
+	w.Header().Set("Content-Type", "application/json")
+	fmt.Fprintf(w, `{"success":true,"filename":"%s","taskId":"%s"}`, finalName, hostname)
+}
+
+func deleteHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodDelete {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	filename := r.URL.Query().Get("file")
+	if filename == "" {
+		http.Error(w, `{"error":"missing file parameter"}`, http.StatusBadRequest)
+		return
+	}
+
+	filepath := filepath.Join(uploadsDir, filepath.Base(filename))
+	if err := os.Remove(filepath); err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"%v"}`, err), http.StatusInternalServerError)
+		return
+	}
+
+	hostname, _ := os.Hostname()
+	w.Header().Set("Content-Type", "application/json")
+	fmt.Fprintf(w, `{"success":true,"taskId":"%s"}`, hostname)
 }

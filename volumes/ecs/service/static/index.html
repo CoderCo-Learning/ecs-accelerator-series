@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ECS + EFS File Sharing Demo</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 2rem;
+        }
+        .container {
+            max-width: 900px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            overflow: hidden;
+        }
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 2rem;
+            text-align: center;
+        }
+        .header h1 { margin-bottom: 0.5rem; }
+        .task-info {
+            display: inline-block;
+            background: rgba(255,255,255,0.2);
+            padding: 0.5rem 1rem;
+            border-radius: 20px;
+            margin-top: 1rem;
+            font-size: 0.9rem;
+        }
+        .content { padding: 2rem; }
+        .upload-zone {
+            border: 3px dashed #667eea;
+            border-radius: 8px;
+            padding: 3rem;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.3s;
+            margin-bottom: 2rem;
+        }
+        .upload-zone:hover, .upload-zone.drag-over {
+            background: #f0f4ff;
+            border-color: #764ba2;
+        }
+        .upload-zone input { display: none; }
+        .upload-btn {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            padding: 0.75rem 2rem;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 1rem;
+            margin-top: 1rem;
+        }
+        .upload-btn:hover { transform: translateY(-2px); box-shadow: 0 5px 15px rgba(102,126,234,0.4); }
+        .files-section h2 {
+            margin-bottom: 1rem;
+            color: #333;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .refresh-btn {
+            background: none;
+            border: 2px solid #667eea;
+            color: #667eea;
+            padding: 0.5rem 1rem;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.9rem;
+        }
+        .refresh-btn:hover { background: #667eea; color: white; }
+        .file-list {
+            display: grid;
+            gap: 1rem;
+        }
+        .file-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            background: #f8f9fa;
+            padding: 1rem;
+            border-radius: 8px;
+            transition: all 0.2s;
+        }
+        .file-item:hover { background: #e9ecef; transform: translateX(5px); }
+        .file-info { flex: 1; }
+        .file-name { font-weight: 600; color: #333; }
+        .file-meta { font-size: 0.85rem; color: #666; margin-top: 0.25rem; }
+        .delete-btn {
+            background: #dc3545;
+            color: white;
+            border: none;
+            padding: 0.5rem 1rem;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.85rem;
+        }
+        .delete-btn:hover { background: #c82333; }
+        .empty-state {
+            text-align: center;
+            padding: 3rem;
+            color: #999;
+        }
+        .alert {
+            padding: 1rem;
+            border-radius: 6px;
+            margin-bottom: 1rem;
+            animation: slideIn 0.3s;
+        }
+        .alert-success { background: #d4edda; color: #155724; border-left: 4px solid #28a745; }
+        .alert-error { background: #f8d7da; color: #721c24; border-left: 4px solid #dc3545; }
+        @keyframes slideIn {
+            from { transform: translateY(-20px); opacity: 0; }
+            to { transform: translateY(0); opacity: 1; }
+        }
+        .loading {
+            text-align: center;
+            padding: 2rem;
+            color: #667eea;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🚀 ECS Fargate + EFS Demo</h1>
+            <p>Upload files and watch them persist across container restarts</p>
+            <div class="task-info" id="taskInfo">Loading...</div>
+        </div>
+        
+        <div class="content">
+            <div id="alerts"></div>
+            
+            <div class="upload-zone" id="uploadZone">
+                <input type="file" id="fileInput" multiple>
+                <div>
+                    <h3>📁 Drop files here or click to upload</h3>
+                    <p style="color: #666; margin-top: 0.5rem;">Max 10MB per file</p>
+                    <button class="upload-btn" onclick="document.getElementById('fileInput').click()">
+                        Choose Files
+                    </button>
+                </div>
+            </div>
+
+            <div class="files-section">
+                <h2>
+                    Shared Files (EFS)
+                    <button class="refresh-btn" onclick="loadFiles()">↻ Refresh</button>
+                </h2>
+                <div id="filesList" class="loading">Loading files...</div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const uploadZone = document.getElementById('uploadZone');
+        const fileInput = document.getElementById('fileInput');
+
+        // Load task info and files on page load
+        loadInfo();
+        loadFiles();
+        setInterval(loadInfo, 10000); // Refresh task info every 10s
+
+        async function loadInfo() {
+            try {
+                const res = await fetch('/api/info');
+                const data = await res.json();
+                document.getElementById('taskInfo').innerHTML = 
+                    `Task: <strong>${data.taskId}</strong> | EFS: ${data.efsStatus}`;
+            } catch (e) {
+                console.error('Failed to load info:', e);
+            }
+        }
+
+        async function loadFiles() {
+            const filesList = document.getElementById('filesList');
+            try {
+                const res = await fetch('/api/files');
+                const data = await res.json();
+                
+                if (data.files.length === 0) {
+                    filesList.innerHTML = '<div class="empty-state">No files yet – upload something!</div>';
+                    return;
+                }
+
+                filesList.innerHTML = data.files.map(file => `
+                    <div class="file-item">
+                        <div class="file-info">
+                            <div class="file-name">📄 ${file.name}</div>
+                            <div class="file-meta">
+                                ${formatBytes(file.size)} • 
+                                Last modified: ${new Date(file.modified).toLocaleString()} •
+                                Served by: ${data.taskId}
+                            </div>
+                        </div>
+                        <button class="delete-btn" onclick="deleteFile('${file.name}')">Delete</button>
+                    </div>
+                `).join('');
+            } catch (e) {
+                filesList.innerHTML = '<div class="alert alert-error">Failed to load files</div>';
+            }
+        }
+
+        async function uploadFile(file) {
+            const formData = new FormData();
+            formData.append('file', file);
+
+            try {
+                const res = await fetch('/api/upload', {
+                    method: 'POST',
+                    body: formData
+                });
+                const data = await res.json();
+                
+                if (data.success) {
+                    showAlert(`✓ Uploaded ${data.filename} to task ${data.taskId}`, 'success');
+                    loadFiles();
+                } else {
+                    showAlert(`✗ Upload failed: ${data.error}`, 'error');
+                }
+            } catch (e) {
+                showAlert(`✗ Upload error: ${e.message}`, 'error');
+            }
+        }
+
+        async function deleteFile(filename) {
+            if (!confirm(`Delete ${filename}?`)) return;
+
+            try {
+                const res = await fetch(`/api/delete?file=${encodeURIComponent(filename)}`, {
+                    method: 'DELETE'
+                });
+                const data = await res.json();
+                
+                if (data.success) {
+                    showAlert(`✓ Deleted ${filename} from task ${data.taskId}`, 'success');
+                    loadFiles();
+                } else {
+                    showAlert(`✗ Delete failed: ${data.error}`, 'error');
+                }
+            } catch (e) {
+                showAlert(`✗ Delete error: ${e.message}`, 'error');
+            }
+        }
+
+        function showAlert(message, type) {
+            const alerts = document.getElementById('alerts');
+            const alert = document.createElement('div');
+            alert.className = `alert alert-${type}`;
+            alert.textContent = message;
+            alerts.appendChild(alert);
+            setTimeout(() => alert.remove(), 5000);
+        }
+
+        function formatBytes(bytes) {
+            if (bytes === 0) return '0 Bytes';
+            const k = 1024;
+            const sizes = ['Bytes', 'KB', 'MB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return Math.round(bytes / Math.pow(k, i) * 100) / 100 + ' ' + sizes[i];
+        }
+
+        // Drag & drop handlers
+        uploadZone.addEventListener('click', () => fileInput.click());
+        uploadZone.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            uploadZone.classList.add('drag-over');
+        });
+        uploadZone.addEventListener('dragleave', () => uploadZone.classList.remove('drag-over'));
+        uploadZone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            uploadZone.classList.remove('drag-over');
+            [...e.dataTransfer.files].forEach(uploadFile);
+        });
+        fileInput.addEventListener('change', (e) => {
+            [...e.target.files].forEach(uploadFile);
+            e.target.value = '';
+        });
+    </script>
+</body>
+</html>

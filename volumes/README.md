@@ -96,21 +96,52 @@ Check logs:
 
 AWS provides two primary storage options:
 
+### Fargate Ephemeral Storage
+
+Every Fargate task has ephemeral disk storage:
+- Default: 20GB per task
+- Configurable: up to 200GB
+- Lifespan: Lives and dies with the task
+- Use case: Temporary files, build artifacts, unzip operations
+
+```json
+"ephemeralStorage": {
+"sizeInGiB": 50
+}
+```
+**Not suitable for persistence** – disappears when task stops.
+
+
 ### EBS (Elastic Block Store)
 
-- Block storage
-- Attached to a single EC2 instance
-- Not shared across ECS tasks
+Block storage attached to a single EC2 instance.
+
+**Characteristics:**
 - High performance, low latency
-- Cannot be used with Fargate
+- Cannot be shared across multiple instances
+- Only works with ECS on EC2 (not Fargate)
+
+**Use case:** High-performance storage for single-instance workloads on EC2.
+
+**Limitation:** If ECS moves your task to another instance, EBS doesn't follow.
 
 ### EFS (Elastic File System)
 
-- Network file system
-- Shared across multiple ECS tasks
-- Multi-AZ
-- Works with EC2 and Fargate
-- Best choice for shared, persistent storage
+Network file system shared across multiple ECS tasks.
+
+**Characteristics:**
+- Shared access – multiple tasks read/write simultaneously
+- Multi-AZ – data replicated across availability zones
+- Works with both Fargate and EC2
+- Elastic capacity – scales automatically
+
+**Use cases:**
+- User uploads (images, documents, media)
+- Shared configuration files
+- Application logs
+- ML model files accessed by multiple containers
+
+**Recommendation:** For ECS applications requiring persistent storage, use EFS 99% of the time.
 
 ## 8. ECS Task Definition Example
 
@@ -140,6 +171,29 @@ AWS provides two primary storage options:
 }
 ```
 
+## ECS Fargate equivalents
+
+| Docker            | ECS Fargate                   |
+| ----------------- | ----------------------------- |
+| Docker volume     | EFS filesystem                |
+| Local mount       | EFS access point              |
+| `-v volume:/path` | Task definition `mountPoints` |
+| Host persistence  | Network persistence           |
+
+## ECS Fargate + EFS architecture
+
+High level flow:
+
+- Create EFS filesystem
+
+- Create EFS access point (optional but best practice)
+
+- Allow NFS (2049) in SGs
+
+- Reference EFS in ECS task definition
+
+- Mount inside container
+
 ## 9. When to Use What
 
 | Use Case | Storage Type |
@@ -158,6 +212,7 @@ AWS provides two primary storage options:
 # EFS with ECS Fargate
 
 ## Overview
+
 This demo shows how to attach Amazon EFS (Elastic File System) to ECS Fargate tasks for persistent, shared storage across containers.
 
 
@@ -227,6 +282,18 @@ Solution: EFS Provides
 - Shared access – multiple tasks can read/write the same files simultaneously
 - Multi-AZ durability – data replicated across Availability Zones
 - Elastic scaling – storage grows automatically as you write data
+
+## How It Works: Boot Sequence
+
+1. ECS schedules task in subnet A
+2. Task reads task definition, sees EFS volume configuration
+3. Resolves `fs-12345.efs.us-east-1.amazonaws.com` via VPC DNS
+4. Connects to mount target in subnet A on port 2049
+5. Security groups validate traffic
+6. EFS mounted at `/mnt/efs` inside container
+7. Application writes to `/mnt/efs/uploads/file.jpg` – data persists on EFS
+8. Task stops and restarts – new task mounts same EFS, sees same files
+
 
 ## Common Use Cases
 
@@ -324,3 +391,23 @@ terraformvolume {
 - Concurrent mounts: No hard limit but monitor performance
 - File size: Max 52TB per file
 - Path length: Max 255 characters per component
+
+## Summary
+
+**Docker Volumes (Local Development):**
+- Bind mounts for simple local dev
+- Named volumes for cleaner local persistence
+- Cannot work in cloud environments like Fargate
+
+**ECS Storage (Production):**
+- Ephemeral storage for temporary files
+- EBS for single-instance high-performance workloads (EC2 only)
+- EFS for shared, persistent storage across multiple tasks
+
+**Key Principle:** Separate compute (containers) from storage (EFS). Containers are disposable, data is not.
+
+**The mental model:**
+- Docker volume = "storage on this machine"
+- EFS = "storage accessible from any machine in the VPC"
+
+This is fundamental to running stateful workloads in container orchestration platforms.

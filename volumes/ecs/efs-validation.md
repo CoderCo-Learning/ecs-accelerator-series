@@ -17,8 +17,6 @@
 | Use case | Shared configs/uploads | DB data, logs | Object storage |
 | Cost | Per GB + transfer | Per GB provisioned | Per GB + requests |
 
-
-
 ```bash
 
 # once tf is applied
@@ -155,13 +153,22 @@ aws ecs update-service \
 # exec into running task
 aws ecs execute-command \
   --cluster scfdemo-dev \
-  --task <task-id> \
+  --task 6a9b4afa048142199e759958136ae24c \
+  --container scfdemo-dev-api \
+  --interactive \
+  --command "/bin/sh" \
+  --region us-east-1
+
+aws ecs execute-command \
+  --cluster scfdemo-dev \
+  --task de14cf5124ea4131bc2353424008a649 \
   --container scfdemo-dev-api \
   --interactive \
   --command "/bin/sh" \
   --region us-east-1
 
 # inside container, check EFS mount
+mkdir -p /mnt/efs/uploads
 ls -la /mnt/efs
 echo "test" > /mnt/efs/test.txt
 cat /mnt/efs/test.txt
