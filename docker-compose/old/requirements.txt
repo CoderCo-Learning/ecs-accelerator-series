@@ -1,0 +1,3 @@
+redis
+psycopg2-binary
+flask
