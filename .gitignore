@@ -18,6 +18,7 @@ data**
 __pycache__/
 *.py[codz]
 *$py.class
+# *.project*
 
 # C extensions
 *.so

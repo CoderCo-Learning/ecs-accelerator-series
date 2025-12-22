@@ -4,6 +4,8 @@ The aim is to cover core portions of the ECS projects hence the name "ECS Accele
 
 - [EP 1: Container Building From Scratch](container-from-scratch/README.md)
 - [EP 2: Docker in production](docker-in-prod/README.md)
-- [EP 3: Docker Compose Deep Dive]
-- [EP 4: Terraform modules]
-- [EP 5: CI/CD]
+- [EP 3: Container Volumes](volumes/README.md)
+- [EP 4: Docker Compose Deep Dive](docker-compose/README.md)
+- [EP 4.5: Docker Hardened Images](hardened-images/README.md)
+- [EP X: Terraform modules]
+- [EP X: CI/CD]
