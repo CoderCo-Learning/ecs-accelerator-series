@@ -1,0 +1,12 @@
+# Build stage – uses -dev variant with shell/tools
+FROM dhi.io/python:3.13-dev AS builder
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --target=/app/deps -r requirements.txt
+
+# Runtime stage – distroless, no shell
+FROM dhi.io/python:3.13
+COPY --from=builder /app/deps /app/deps
+COPY . /app
+ENV PYTHONPATH=/app/deps
+CMD ["python", "/app/main.py"]
