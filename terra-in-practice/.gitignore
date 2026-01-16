@@ -1,0 +1,8 @@
+## OS & env
+.env
+.DS
+
+## Terraform 
+terraform.tfstate
+terraform.tfstate.backup
+.terraform
