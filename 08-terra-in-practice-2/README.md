@@ -10,7 +10,7 @@ You have the same infrastructure across multiple environments:
 
 ```
 ┌─────────────────────────────────────────────────────┐
-│                 Same Infrastructure                  │
+│                 Same Infrastructure                 │
 ├─────────────┬─────────────┬─────────────────────────┤
 │     Dev     │   Staging   │          Prod           │
 ├─────────────┼─────────────┼─────────────────────────┤
