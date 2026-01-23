@@ -53,7 +53,7 @@ locals {
       ssm_params = {
         log_level     = "warn"
         api_url       = "https://api.example.com"
-        feature_flags = ""
+        feature_flags = "none"
       }
     }
   }

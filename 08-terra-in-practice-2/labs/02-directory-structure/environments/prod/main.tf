@@ -12,7 +12,7 @@ module "app" {
   ssm_parameters = {
     log_level     = "warn"
     api_url       = "https://api.example.com"
-    feature_flags = ""
+    feature_flags = "none"
     rate_limit    = "1000"
     cache_ttl     = "3600"
   }

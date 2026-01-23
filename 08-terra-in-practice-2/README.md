@@ -17,8 +17,8 @@ You have the same infrastructure across multiple environments:
 │ S3 bucket   │ S3 bucket   │ S3 bucket               │
 │ IAM role    │ IAM role    │ IAM role                │
 │ SSM params  │ SSM params  │ SSM params              │
-│             │             │ + Audit bucket          │
-│             │             │ + Backup bucket         │
+│             │ + Test data │ + Audit bucket          │
+│             │   bucket    │ + Backup bucket         │
 └─────────────┴─────────────┴─────────────────────────┘
 ```
 
@@ -45,18 +45,49 @@ You have the same infrastructure across multiple environments:
 
 ```bash
 # 1. Start LocalStack
-make setup
+docker-compose up -d
 
-# 2. Run any demo
-make demo-ws      # Workspaces demo
-make demo-dir     # Directory structure demo
-make demo-tg      # Terragrunt demo
+# Wait a few seconds, then verify
+curl http://localhost:4566/_localstack/health
 
-# 3. Clean up
-make teardown
+# 2. Navigate to a lab and follow along
+cd labs/01-workspaces
+terraform init
 ```
 
-Run `make help` to see all available commands.
+---
+
+## A Note on LocalStack vs Real AWS
+
+In this demo, we're using **LocalStack** – a local AWS emulator. All three environments (dev, staging, prod) run against the same LocalStack instance, which is like using the **same AWS account**.
+
+**Why doesn't this cause conflicts?**
+
+Each environment uses a **name prefix** to avoid collisions:
+
+```
+Dev bucket:     dev-demo-app-905e3452
+Staging bucket: staging-demo-app-3d0cad06
+Prod bucket:    prod-demo-app-9ce8102d
+```
+
+**In the real world**, you'd typically use **separate AWS accounts** per environment for proper isolation:
+
+```hcl
+# environments/dev/providers.tf
+provider "aws" {
+  region  = "eu-west-2"
+  profile = "dev-account"
+}
+
+# environments/prod/providers.tf
+provider "aws" {
+  region  = "eu-west-2"
+  profile = "prod-account"  # Different account!
+}
+```
+
+The **directory structure pattern works either way** – same account with prefixes, or separate accounts. That's the power: each folder can have completely different provider configs.
 
 ---
 
@@ -104,11 +135,13 @@ terraform workspace select prod
 terraform apply  # Which environment? No visual indicator!
 ```
 
+Run `terraform workspace show` to check – but you have to remember to do it.
+
 **When to use:** Solo dev, prototyping, ephemeral PR environments.
 
 **When to avoid:** Teams > 2-3 people, production workloads.
 
-→ See `labs/01-workspaces/` for the full example.
+→ See `labs/01-workspaces/README.md` for full walkthrough.
 
 ---
 
@@ -126,10 +159,12 @@ terraform apply  # Which environment? No visual indicator!
 │
 └── environments/
     ├── dev/                 ← cd here = you're in dev
-    │   ├── main.tf          ← Calls the module
+    │   ├── main.tf
     │   └── providers.tf
     │
-    ├── staging/
+    ├── staging/             ← Has test_data bucket
+    │   ├── main.tf
+    │   └── providers.tf
     │
     └── prod/                ← Has EXTRA resources
         ├── main.tf          ← Module + audit + backup buckets
@@ -157,29 +192,43 @@ module "app" {
 
 # Prod-only resources - just add them here
 resource "aws_s3_bucket" "audit_logs" {
-  bucket = "prod-audit-logs"
+  bucket = "prod-audit-logs-${random_id.suffix.hex}"
+}
+
+resource "aws_s3_bucket" "backups" {
+  bucket = "prod-backups-${random_id.suffix.hex}"
 }
 ```
 
 **Why it's better:**
 
 ```bash
-# Workspaces - silent, easy to forget
+# Workspaces - silent, easy to forget which one you're in
 terraform workspace select prod
 
-# Directory structure - your prompt tells you
+# Directory structure - your terminal prompt tells you
 ~/environments/prod $ terraform apply
+
+# Run pwd - you always know where you are
+pwd
+/home/user/environments/prod
 ```
 
 **The "duplication" is a feature:**
+
 - Each environment is self-contained
-- Prod can have different provider settings
+- Prod can have different provider settings (different account, region)
 - Git diff shows exactly what changed per environment
-- No inheritance chains to debug at 2am
+- No inheritance chains to debug on-call. 
+
+**Divergence is natural:**
+
+- Need extra resources in prod? Just add them to `environments/prod/main.tf`
+- No awkward `count = terraform.workspace == "prod" ? 1 : 0`
 
 **When to use:** Most teams. This is the default recommendation.
 
-→ See `labs/02-directory-structure/` for the full example.
+→ See `labs/02-directory-structure/README.md` for full walkthrough.
 
 ---
 
@@ -190,6 +239,9 @@ terraform workspace select prod
 ```
 03-terragrunt/
 ├── terragrunt.hcl           ← Root config (generates provider.tf)
+│
+├── modules/
+│   └── app-stack/
 │
 └── environments/
     ├── dev/
@@ -233,49 +285,146 @@ inputs = {
 
 | Approach | Files per env | Lines per env |
 |----------|---------------|---------------|
-| Directory | 4-5 files | ~100 lines |
+| Directory | 3-4 files | ~60 lines |
 | Terragrunt | 1 file | ~25 lines |
 
-**Power feature - deploy everything:**
+**Power feature – deploy everything at once:**
 
 ```bash
 cd environments
-terragrunt run-all apply  # Deploys dev, staging, prod in parallel
+terragrunt run-all apply --terragrunt-non-interactive
+# Deploys dev, staging, prod in one command
 ```
 
-**When to use:** 10+ environments, complex dependencies, multiple accounts.
+**When to use:** 10+ environments, complex dependencies between stacks, multiple AWS accounts.
 
-**When to avoid:** Learning Terraform, small teams, simple infrastructure.
+**When to avoid:** Learning Terraform (learn native first), small teams, simple infrastructure.
 
-→ See `labs/03-terragrunt/` for the full example.
+→ See `labs/03-terragrunt/README.md` for full walkthrough.
 
 ---
 
-## Comparison
+## Comparison Summary
 
 | Aspect | Workspaces | Directory | Terragrunt |
 |--------|------------|-----------|------------|
 | State visibility | Hidden in `.d/` | Explicit per folder | Explicit per folder |
 | Switch environments | `workspace select` | `cd environments/X` | `cd environments/X` |
+| Know where you are | Run `workspace show` | Look at your prompt | Look at your prompt |
 | Environment divergence | Awkward (`count = x ? 1 : 0`) | Natural (add resources) | Natural |
-| CI/CD | Set workspace variable | Set working directory | Set working directory |
+| CI/CD setup | Set workspace variable | Set working directory | Set working directory |
 | Risk of wrong env | **High** | Low | Low |
 | Learning curve | None | None | Medium |
+| DRYness | Medium | Low | High |
 | Best for | Prototyping | Most teams | Large orgs |
 
 ---
 
-## What We're Building
+## What Gets Created
 
-Each approach deploys the same "app stack":
+| Resource | Dev | Staging | Prod |
+|----------|-----|---------|------|
+| S3 app bucket | ✓ | ✓ | ✓ |
+| S3 bucket versioning | ✗ | ✓ | ✓ |
+| IAM role + policy | ✓ | ✓ | ✓ |
+| SSM parameters | 3 | 3 | 3 |
+| S3 test data bucket | ✗ | ✓ | ✗ |
+| S3 audit logs bucket | ✗ | ✗ | ✓ |
+| S3 backups bucket | ✗ | ✗ | ✓ |
 
-- **S3 bucket** - App storage with environment-specific versioning
-- **IAM role + policy** - App permissions for S3 and SSM access
-- **SSM parameters** - Environment-specific config (log_level, api_url, etc.)
+**Environment-specific config:**
 
-Plus environment-specific extras:
-- **Staging:** Test data bucket
-- **Prod:** Audit logs bucket + Backup bucket
+| Setting | Dev | Staging | Prod |
+|---------|-----|---------|------|
+| `versioning` | false | true | true |
+| `log_level` | debug | info | warn |
+| `log_retention` | 7 days | 30 days | 90 days |
+
+---
+
+## Full Lab Commands
+
+### Lab 1: Workspaces
+
+```bash
+cd labs/01-workspaces
+terraform init
+
+# Create and deploy DEV
+terraform workspace new dev
+terraform apply -auto-approve
+terraform output
+
+# Create and deploy STAGING
+terraform workspace new staging
+terraform apply -auto-approve
+terraform output
+
+# Create and deploy PROD
+terraform workspace new prod
+terraform apply -auto-approve
+terraform output
+
+# The danger - which workspace are you in?
+terraform workspace list
+terraform workspace show
+
+# Cleanup
+terraform workspace select dev && terraform destroy -auto-approve
+terraform workspace select staging && terraform destroy -auto-approve
+terraform workspace select prod && terraform destroy -auto-approve
+```
+
+### Lab 2: Directory Structure
+
+```bash
+# Deploy DEV
+cd labs/02-directory-structure/environments/dev
+terraform init
+terraform apply -auto-approve
+terraform output
+
+# Deploy STAGING
+cd ../staging
+terraform init
+terraform apply -auto-approve
+terraform output
+
+# Deploy PROD (has extra resources)
+cd ../prod
+terraform init
+terraform apply -auto-approve
+terraform output
+terraform state list  # See the extra buckets
+
+# Key point - you always know where you are
+pwd
+
+# Cleanup
+cd ../dev && terraform destroy -auto-approve
+cd ../staging && terraform destroy -auto-approve
+cd ../prod && terraform destroy -auto-approve
+```
+
+### Lab 3: Terragrunt
+
+```bash
+# Deploy DEV
+cd labs/03-terragrunt/environments/dev
+terragrunt init
+terragrunt apply -auto-approve
+terragrunt output
+
+# Check what got generated
+ls -la  # See provider.tf and backend.tf
+
+# Deploy ALL at once
+cd ..
+terragrunt run-all apply --terragrunt-non-interactive
+
+# Cleanup
+terragrunt run-all destroy --terragrunt-non-interactive
+```
 
 ---
 
@@ -285,48 +434,18 @@ Plus environment-specific extras:
 - Terraform >= 1.0
 - Terragrunt (for Lab 3 only)
 
-**Install Terragrunt:**
+**Install Terragrunt (macOS):**
 
 ```bash
-# macOS
 brew install terragrunt
+```
 
-# Linux
+**Install Terragrunt (Linux):**
+
+```bash
 curl -LO https://github.com/gruntwork-io/terragrunt/releases/latest/download/terragrunt_linux_amd64
 chmod +x terragrunt_linux_amd64
 sudo mv terragrunt_linux_amd64 /usr/local/bin/terragrunt
-```
-
----
-
-## Makefile Commands
-
-```bash
-make help           # Show all commands
-
-# Setup
-make setup          # Start LocalStack
-make teardown       # Stop LocalStack
-make clean          # Remove all state files
-
-# Lab 1: Workspaces
-make ws-init        # Create all workspaces
-make ws-dev         # Deploy dev
-make ws-prod        # Deploy prod
-make ws-list        # Show workspaces
-make ws-destroy     # Destroy all
-
-# Lab 2: Directory Structure  
-make dir-dev        # Deploy dev
-make dir-prod       # Deploy prod
-make dir-all        # Deploy all
-make dir-destroy    # Destroy all
-
-# Lab 3: Terragrunt
-make tg-dev         # Deploy dev
-make tg-prod        # Deploy prod
-make tg-all         # Deploy all (run-all)
-make tg-destroy     # Destroy all
 ```
 
 ---
