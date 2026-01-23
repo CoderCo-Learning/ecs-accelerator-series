@@ -3,7 +3,7 @@
 # =============================================================================
 
 include "root" {
-  path = find_in_parent_folders()
+  path = find_in_parent_folders("root.hcl")
 }
 
 terraform {
@@ -17,7 +17,7 @@ inputs = {
   ssm_parameters = {
     log_level     = "warn"
     api_url       = "https://api.example.com"
-    feature_flags = ""
+    feature_flags = "none"
     rate_limit    = "1000"
     cache_ttl     = "3600"
   }

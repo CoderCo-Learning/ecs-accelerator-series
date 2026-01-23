@@ -4,7 +4,7 @@
 # Notice how minimal this is - just include + inputs
 
 include "root" {
-  path = find_in_parent_folders()
+  path = find_in_parent_folders("root.hcl")
 }
 
 terraform {

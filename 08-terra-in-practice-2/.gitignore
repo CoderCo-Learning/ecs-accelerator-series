@@ -4,3 +4,4 @@
 localstack-data/
 terraform.tfstate*
 .terraform/
+.terragrunt-cache/

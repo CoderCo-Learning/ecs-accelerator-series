@@ -12,7 +12,8 @@
 **/*.tfplan.backup
 **/*.tfplan.backup.*
 data**
-
+localstack-data/
+.terragrunt-cache/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
