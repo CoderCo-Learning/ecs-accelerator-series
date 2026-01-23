@@ -6,7 +6,7 @@ One codebase, multiple state files. Switch environments with `terraform workspac
 
 ## Commands
 
-```bash
+```bash 
 # Initialise
 terraform init
 

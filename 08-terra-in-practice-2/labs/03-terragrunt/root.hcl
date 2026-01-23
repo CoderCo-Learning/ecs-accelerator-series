@@ -65,6 +65,31 @@ generate "backend" {
 }
 
 # -----------------------------------------------------------------------------
+# Plugin Cache
+# -----------------------------------------------------------------------------
+# Share provider plugins across all environments to speed up init.
+
+terraform {
+  before_hook "create_plugin_cache" {
+    commands = ["init"]
+    execute  = ["mkdir", "-p", "${get_parent_terragrunt_dir()}/.terraform-plugin-cache"]
+  }
+
+  extra_arguments "plugin_cache" {
+    commands = ["init", "plan", "apply", "destroy"]
+    
+    env_vars = {
+      TF_PLUGIN_CACHE_DIR = "${get_parent_terragrunt_dir()}/.terraform-plugin-cache"
+    }
+  }
+
+  extra_arguments "auto_approve" {
+    commands = ["apply", "destroy"]
+    arguments = ["-auto-approve"]
+  }
+}
+
+# -----------------------------------------------------------------------------
 # Common Inputs
 # -----------------------------------------------------------------------------
 # These are passed to all modules. Child configs can override.
