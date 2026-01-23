@@ -1,3 +1,6 @@
 .env
 .DS_Store
 
+localstack-data/
+terraform.tfstate*
+.terraform/
