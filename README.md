@@ -10,4 +10,5 @@ The aim is to cover core portions of the ECS projects hence the name "ECS Accele
 - [EP 5: Image Promotion Strategy](05-image-promotion-strategy/README.md)
 - [EP 6: Terraform Introduction](06-terraform-intro/README.md)
 - [EP 7: Terraform In Practice](07-terra-in-practice/README.md)
+- [EP 8: Terraform In Practice 2](08-terra-in-practice-2/README.md)
 - [EP X: CI/CD]
