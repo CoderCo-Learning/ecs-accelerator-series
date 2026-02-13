@@ -420,3 +420,278 @@ Next week: ALB, HTTPS, DNS.
 1. Draw the networking diagram for your ECS project
 2. Decide: public subnets only (cheaper) or public + private (more secure)?
 3. Look at the code in the repo
+
+---
+
+## ECS Deep Dive
+
+### What is ECS?
+
+Elastic Container Service. AWS managed container orchestration. You tell AWS what containers to run, ECS handles scheduling, scaling, health checks, networking.
+
+Think of ECS as a hotel manager. You describe the room requirements (task definition), the manager assigns rooms (scheduling) and handles housekeeping (health checks, restarts).
+
+### Fargate vs EC2 Launch Type
+
+**Fargate (Serverless):**
+- AWS manages the servers
+- No EC2 instances to manage
+- Pay per task (CPU + memory + time)
+- Best for: most workloads, variable traffic, simplicity
+
+**EC2 Launch Type:**
+- You manage EC2 instances
+- ECS agent runs on each instance
+- More control, more complexity
+- Best for: GPU workloads, specific instance types, cost optimisation at scale
+
+For the ECS project, use Fargate. Simpler, no servers to manage.
+
+---
+
+## ECS Cluster
+
+Logical grouping of tasks and services. A namespace - a boundary for your application.
+
+```
+┌─────────────────────────────────────────┐
+│            ECS Cluster                   │
+│         "my-app-cluster"                 │
+│                                          │
+│  ┌─────────────┐  ┌─────────────┐       │
+│  │  Service A  │  │  Service B  │       │
+│  │  (API)      │  │  (Worker)   │       │
+│  │             │  │             │       │
+│  │ Task  Task  │  │ Task  Task  │       │
+│  └─────────────┘  └─────────────┘       │
+└─────────────────────────────────────────┘
+```
+
+A cluster can have multiple services. Each service runs multiple tasks.
+
+```hcl
+resource "aws_ecs_cluster" "main" {
+  name = "my-app-cluster"
+
+  setting {
+    name  = "containerInsights"
+    value = "enabled"  # CloudWatch metrics for containers
+  }
+}
+```
+
+---
+
+## Task Definition
+
+The blueprint. Describes HOW to run your container.
+
+```
+┌─────────────────────────────────────────────────┐
+│              Task Definition                     │
+│              "my-app:3"                          │
+│                                                  │
+│  Family: my-app                                  │
+│  Revision: 3                                     │
+│                                                  │
+│  Container Definition:                           │
+│    Name: app                                     │
+│    Image: 123456.dkr.ecr.../:latest             │
+│    Port: 80                                      │
+│    CPU: 256                                      │
+│    Memory: 512                                   │
+│                                                  │
+│  Network Mode: awsvpc                           │
+│  Execution Role: ecs-execution-role             │
+└─────────────────────────────────────────────────┘
+```
+
+### Key Settings
+
+**Family and Revision:**
+- Family = name of the task definition
+- Revision = version number (auto-increments)
+- Together: my-app:3 (family:revision)
+
+**Network Mode:**
+- `awsvpc` - each task gets its own ENI. Required for Fargate.
+- `bridge` - Docker bridge network. EC2 only.
+- `host` - Uses host network. EC2 only.
+
+For Fargate, always use `awsvpc`.
+
+**CPU and Memory (Fargate):**
+
+| CPU | Memory Options |
+|-----|----------------|
+| 256 | 512, 1024, 2048 |
+| 512 | 1024 - 4096 |
+| 1024 | 2048 - 8192 |
+| 2048 | 4096 - 16384 |
+| 4096 | 8192 - 30720 |
+
+Start small. 256 CPU / 512 memory is enough for most simple apps.
+
+---
+
+## Container Definition
+
+Inside the task definition. Describes the actual container.
+
+```hcl
+container_definitions = jsonencode([{
+  name      = "app"
+  image     = "123456.dkr.ecr.../my-app:v1.2.3"
+  essential = true
+  
+  portMappings = [{
+    containerPort = 80
+    protocol      = "tcp"
+  }]
+  
+  environment = [
+    { name = "NODE_ENV", value = "production" }
+  ]
+  
+  secrets = [
+    { name = "DB_PASSWORD", valueFrom = "arn:aws:ssm:..." }
+  ]
+  
+  logConfiguration = {
+    logDriver = "awslogs"
+    options = {
+      "awslogs-group"         = "/ecs/my-app"
+      "awslogs-region"        = "eu-west-2"
+      "awslogs-stream-prefix" = "ecs"
+    }
+  }
+}])
+```
+
+### Essential Container
+
+`essential = true` means if this container stops, the whole task stops.
+
+### Environment vs Secrets
+
+- `environment` - plain text, visible in console
+- `secrets` - pulled from SSM Parameter Store or Secrets Manager at runtime
+
+**Never put passwords in environment. Always use secrets.**
+
+### Logging
+
+`awslogs` driver sends stdout/stderr to CloudWatch Logs. Essential for debugging.
+
+```hcl
+resource "aws_cloudwatch_log_group" "ecs" {
+  name              = "/ecs/my-app"
+  retention_in_days = 30
+}
+```
+
+---
+
+## IAM Roles - Execution vs Task
+
+Two different roles. People confuse these constantly.
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                                                          │
+│   EXECUTION ROLE                    TASK ROLE            │
+│   (ECS Agent uses this)             (Your app uses this) │
+│                                                          │
+│   - Pull images from ECR            - Call S3            │
+│   - Write logs to CloudWatch        - Call DynamoDB      │
+│   - Pull secrets from SSM           - Call SQS           │
+│                                                          │
+│   Required for task to START        Optional             │
+│                                                          │
+└─────────────────────────────────────────────────────────┘
+```
+
+### Execution Role
+
+Used by ECS agent to set up the task. Without this, task can't start.
+
+```hcl
+resource "aws_iam_role" "ecs_execution" {
+  name = "ecs-execution-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Action = "sts:AssumeRole"
+      Effect = "Allow"
+      Principal = { Service = "ecs-tasks.amazonaws.com" }
+    }]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "ecs_execution" {
+  role       = aws_iam_role.ecs_execution.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+}
+```
+
+### Task Role
+
+Used by your application code. Only needed if your app calls AWS APIs.
+
+For simple apps that only respond to HTTP, you don't need a task role.
+
+---
+
+## ECR - Elastic Container Registry
+
+AWS managed Docker registry. Where your images live.
+
+### Image URI Format
+
+```
+123456789012.dkr.ecr.eu-west-2.amazonaws.com/my-app:v1.2.3
+└──────────────────────────────────────────────┘ └────┘ └────┘
+              Repository URL                    Name   Tag
+```
+
+### Tagging Strategy
+
+**Never use :latest in production.** Use immutable tags:
+- Semantic version: `v1.2.3`
+- Git commit SHA: `abc123f`
+- Build number: `build-456`
+
+Why? `:latest` can change. You won't know what version is running. Can't rollback reliably.
+
+### Lifecycle Policy
+
+Clean up old images automatically.
+
+```hcl
+resource "aws_ecr_repository" "app" {
+  name                 = "my-app"
+  image_tag_mutability = "IMMUTABLE"  # Prevent tag overwrites
+
+  image_scanning_configuration {
+    scan_on_push = true  # Scan for vulnerabilities
+  }
+}
+
+resource "aws_ecr_lifecycle_policy" "app" {
+  repository = aws_ecr_repository.app.name
+
+  policy = jsonencode({
+    rules = [{
+      rulePriority = 1
+      description  = "Keep last 10 images"
+      selection = {
+        tagStatus   = "any"
+        countType   = "imageCountMoreThan"
+        countNumber = 10
+      }
+      action = { type = "expire" }
+    }]
+  })
+}
+```
