@@ -9,15 +9,15 @@ Episode 6-8:  You learned Terraform foundations
 Episode 9:    You deployed ECS manually (ClickOps)
 ```
 
-**Now:** You destroy what you clicked, and rebuild it as code.
+**Now:** You destroy what you clicked and rebuild it as code.
 
 ---
 
-## Why This Matters
+## Why?
 
 ClickOps taught you *what* AWS creates.
 
-Terraform teaches you *how to own it*.
+Terraform teaches you *how to automate it*.
 
 - Reproducible
 - Version controlled
@@ -26,7 +26,7 @@ Terraform teaches you *how to own it*.
 
 ---
 
-## What We're Codifying
+## What We're Going Through Today
 
 Everything you clicked in Episode 9:
 
@@ -91,40 +91,12 @@ That's a lot. We split it:
 │                      PART 2 (Next Week)                     │
 ├─────────────────────────────────────────────────────────────┤
 │                                                             │
-│   Internet → ALB → Target Group → ECS Service → Tasks      │
+│   Internet/Client/User → Route53 → ALB → Target Group → ECS Service → Tasks      │
 │              ↓                                              │
 │         ACM Cert + Route53                                  │
 │                                                             │
 └─────────────────────────────────────────────────────────────┘
 ```
-
----
-
-## Project Structure
-
-How do we organise the Terraform code?
-
-```
-ecs-project/
-├── main.tf           # Provider config
-├── variables.tf      # Input variables
-├── outputs.tf        # What we expose
-├── vpc.tf            # Network resources
-├── security.tf       # Security groups
-├── ecr.tf            # Container registry
-├── iam.tf            # IAM roles
-├── ecs.tf            # Cluster + task definition
-├── alb.tf            # Load balancer (Part 2)
-├── dns.tf            # Route53 + ACM (Part 2)
-└── terraform.tfvars  # Your values
-```
-
-**Why split files?**
-- Easier to navigate
-- Easier to review PRs
-- Logical grouping
-
-Terraform doesn't care - it merges all `.tf` files. This is for *humans*.
 
 ---
 
@@ -251,7 +223,7 @@ This lets ECS pull images from ECR and write logs to CloudWatch.
 
 ---
 
-## What We Don't Do Today
+## For Next Session
 
 - ECS Service (needs ALB)
 - ALB (Part 2)
@@ -278,4 +250,3 @@ Before Part 2:
 
 If you understood ClickOps, you'll understand Terraform.
 
-Next week: we wire it to the internet.
