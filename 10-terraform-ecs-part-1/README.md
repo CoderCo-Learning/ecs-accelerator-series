@@ -9,164 +9,370 @@ Episode 6-8:  You learned Terraform foundations
 Episode 9:    You deployed ECS manually (ClickOps)
 ```
 
-**Now:** You destroy what you clicked and rebuild it as code.
+Now we destroy what you clicked, and rebuild it as code.
 
 ---
 
-## Why?
-
-ClickOps taught you *what* AWS creates.
-
-Terraform teaches you *how to automate it*.
-
-- Reproducible
-- Version controlled
-- Reviewable
-- Destroyable and rebuildable in minutes
-
----
-
-## What We're Going Through Today
-
-Everything you clicked in Episode 9:
+## What We're Codifying
 
 | AWS Console | Terraform Resource |
 |-------------|-------------------|
 | VPC | `aws_vpc` |
 | Subnets | `aws_subnet` |
 | Internet Gateway | `aws_internet_gateway` |
+| NAT Gateway | `aws_nat_gateway` |
 | Route Table | `aws_route_table` |
-| Security Group (ALB) | `aws_security_group` |
-| Security Group (ECS) | `aws_security_group` |
+| Security Group | `aws_security_group` |
 | ECR Repository | `aws_ecr_repository` |
 | ECS Cluster | `aws_ecs_cluster` |
 | Task Definition | `aws_ecs_task_definition` |
-| IAM Role (execution) | `aws_iam_role` |
-| ALB | `aws_lb` |
-| Target Group | `aws_lb_target_group` |
-| Listener | `aws_lb_listener` |
-| ECS Service | `aws_ecs_service` |
-| ACM Certificate | `aws_acm_certificate` |
-| Route53 Record | `aws_route53_record` |
-
-That's a lot. We split it:
-
-- **Part 1 (today):** Foundation - VPC, cluster, task definition
-- **Part 2 (next week):** Wiring - ALB, HTTPS, DNS, service
+| IAM Role | `aws_iam_role` |
 
 ---
 
-## The Mental Model
+## VPC - Virtual Private Cloud
+
+Your own isolated network inside AWS. Think of AWS as a massive data centre - a VPC is your private section with your own IP range, network rules, and routing decisions.
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                        PART 1 (Today)                       │
-├─────────────────────────────────────────────────────────────┤
-│                                                             │
-│   ┌─────────────────── VPC ───────────────────┐            │
-│   │                                            │            │
-│   │   ┌────────────┐    ┌────────────┐        │            │
-│   │   │  Subnet A  │    │  Subnet B  │        │            │
-│   │   │  (public)  │    │  (public)  │        │            │
-│   │   └────────────┘    └────────────┘        │            │
-│   │                                            │            │
-│   │   ┌────────────────────────────────┐      │            │
-│   │   │         ECS Cluster            │      │            │
-│   │   │   ┌────────────────────────┐   │      │            │
-│   │   │   │    Task Definition     │   │      │            │
-│   │   │   │  (container spec)      │   │      │            │
-│   │   │   └────────────────────────┘   │      │            │
-│   │   └────────────────────────────────┘      │            │
-│   │                                            │            │
-│   └────────────────────────────────────────────┘            │
-│                                                             │
-│   ┌──────────────┐    ┌──────────────────────┐             │
-│   │     ECR      │    │   IAM Execution Role │             │
-│   │  (registry)  │    │   (pull images)      │             │
-│   └──────────────┘    └──────────────────────┘             │
-│                                                             │
-└─────────────────────────────────────────────────────────────┘
-
-┌─────────────────────────────────────────────────────────────┐
-│                      PART 2 (Next Week)                     │
-├─────────────────────────────────────────────────────────────┤
-│                                                             │
-│   Internet/Client/User → Route53 → ALB → Target Group → ECS Service → Tasks      │
-│              ↓                                              │
-│         ACM Cert + Route53                                  │
-│                                                             │
-└─────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────┐
+│                        AWS Cloud                         │
+│  ┌───────────────────────────────────────────────────┐  │
+│  │                    Your VPC                        │  │
+│  │                  10.0.0.0/16                       │  │
+│  │   Your resources live here, isolated from others  │  │
+│  └───────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────┘
 ```
 
----
+### CIDR Block
 
-## The Dependency Chain
+The IP range for your VPC.
 
-Terraform figures out order automatically, but you should understand it:
+| CIDR | IP Addresses |
+|------|--------------|
+| /16 | 65,536 |
+| /24 | 256 |
+| /28 | 16 |
 
-```
-VPC
- └── Subnets
-      └── Security Groups
-           └── ECS Cluster
-                └── Task Definition
-                     └── ECS Service (needs ALB first - Part 2)
-```
-
-```
-ECR Repository ──┐
-                 ├── Task Definition (references image URI)
-IAM Role ────────┘
-```
-
-If you try to create a task definition without:
-- ECR repo → no image to pull
-- IAM role → no permission to pull
-
-Terraform handles this. But *you* need to understand why.
-
----
-
-## Key Resources (Theory)
-
-### 1. VPC
+**Best practice:** Use `10.0.0.0/16` for most projects. Room to grow.
 
 ```hcl
 resource "aws_vpc" "main" {
   cidr_block           = "10.0.0.0/16"
-  enable_dns_hostnames = true
-  enable_dns_support   = true
+  enable_dns_hostnames = true   # Instances get DNS names
+  enable_dns_support   = true   # Required for ECS service discovery
 }
 ```
 
-The network boundary. Everything lives inside this.
+---
 
-### 2. Subnets
+## Subnets
+
+Subdivisions of your VPC. Carve up your VPC into smaller networks.
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                    VPC: 10.0.0.0/16                      │
+│                                                          │
+│   ┌─────────────────┐    ┌─────────────────┐            │
+│   │  Public Subnet  │    │  Public Subnet  │            │
+│   │  10.0.1.0/24    │    │  10.0.2.0/24    │            │
+│   │     AZ-a        │    │     AZ-b        │            │
+│   │  ALB, NAT GW    │    │  ALB            │            │
+│   └─────────────────┘    └─────────────────┘            │
+│                                                          │
+│   ┌─────────────────┐    ┌─────────────────┐            │
+│   │ Private Subnet  │    │ Private Subnet  │            │
+│   │  10.0.10.0/24   │    │  10.0.11.0/24   │            │
+│   │     AZ-a        │    │     AZ-b        │            │
+│   │  ECS Tasks, RDS │    │  ECS Tasks, RDS │            │
+│   └─────────────────┘    └─────────────────┘            │
+└─────────────────────────────────────────────────────────┘
+```
+
+### Public vs Private
+
+**Public Subnet:**
+- Has route to Internet Gateway
+- Resources can have public IPs
+- Use for: ALB, NAT Gateway, bastion hosts
+
+**Private Subnet:**
+- No direct internet route
+- Resources hidden from public
+- Use for: ECS tasks, databases
+- Reaches internet via NAT Gateway
+
+### Why Multiple AZs?
+
+High availability. If AZ-a goes down, AZ-b keeps running.
+
+**ALB requires subnets in at least 2 AZs.**
 
 ```hcl
 resource "aws_subnet" "public" {
   count             = 2
   vpc_id            = aws_vpc.main.id
-  cidr_block        = "10.0.${count.index}.0/24"
+  cidr_block        = "10.0.${count.index + 1}.0/24"
   availability_zone = data.aws_availability_zones.available.names[count.index]
   
-  map_public_ip_on_launch = true  # Fargate needs this for public subnets
+  map_public_ip_on_launch = true  # Required for Fargate in public subnets
+}
+
+resource "aws_subnet" "private" {
+  count             = 2
+  vpc_id            = aws_vpc.main.id
+  cidr_block        = "10.0.${count.index + 10}.0/24"
+  availability_zone = data.aws_availability_zones.available.names[count.index]
 }
 ```
 
-Why 2 subnets? ALB requires at least 2 AZs for high availability.
+---
 
-### 3. ECS Cluster
+## Internet Gateway (IGW)
+
+The door between your VPC and the public internet. Without IGW, nothing can reach the internet.
+
+```
+                    Internet
+                        │
+                        ▼
+              ┌─────────────────┐
+              │ Internet Gateway │
+              └─────────────────┘
+                        │
+                        ▼
+              ┌─────────────────┐
+              │   Public Subnet  │
+              └─────────────────┘
+```
+
+**One IGW per VPC.** That's all you need.
+
+```hcl
+resource "aws_internet_gateway" "main" {
+  vpc_id = aws_vpc.main.id
+}
+```
+
+---
+
+## NAT Gateway
+
+Allows private subnets to reach the internet (outbound only).
+
+ECS tasks in private subnets need to:
+- Pull Docker images from ECR
+- Download packages
+- Call external APIs
+
+But you don't want them exposed to the internet.
+
+**NAT Gateway = one-way door.** Private resources go out, nothing comes in uninvited.
+
+```
+                    Internet
+                        │
+                        ▼
+              ┌─────────────────┐
+              │ Internet Gateway │
+              └─────────────────┘
+                        │
+                        ▼
+              ┌─────────────────┐
+              │   Public Subnet  │
+              │   ┌───────────┐  │
+              │   │  NAT GW   │  │
+              │   └───────────┘  │
+              └─────────────────┘
+                        │
+                        ▼
+              ┌─────────────────┐
+              │  Private Subnet  │
+              │   (ECS Tasks)    │
+              │  Can reach out   │
+              │  Can't be reached│
+              └─────────────────┘
+```
+
+### NAT Gateway vs NAT Instance
+
+| | NAT Gateway | NAT Instance |
+|--|-------------|--------------|
+| Managed | Yes (AWS) | No (you) |
+| High Availability | Built-in | You configure |
+| Bandwidth | Up to 45 Gbps | Instance dependent |
+| Cost | ~$0.045/hr + data | Instance cost |
+
+**Best practice:** Use NAT Gateway. Managed, scales automatically.
+
+### Cost Warning
+
+NAT Gateway costs ~$32/month + data transfer.
+
+For dev/staging:
+- Use public subnets with Fargate (cheaper, less secure)
+- Use VPC endpoints for ECR/S3/CloudWatch (no NAT needed for AWS services)
+
+```hcl
+resource "aws_eip" "nat" {
+  domain = "vpc"
+}
+
+resource "aws_nat_gateway" "main" {
+  allocation_id = aws_eip.nat.id
+  subnet_id     = aws_subnet.public[0].id  # Must be in public subnet
+  
+  depends_on = [aws_internet_gateway.main]
+}
+```
+
+---
+
+## Route Tables
+
+Traffic rules. Tells AWS where to send network traffic. Every subnet needs a route table.
+
+### Public Route Table
+
+Routes `0.0.0.0/0` (everything) to the Internet Gateway.
+
+```
+Destination     │ Target
+────────────────┼──────────────────
+10.0.0.0/16     │ local (within VPC)
+0.0.0.0/0       │ igw-xxx (Internet Gateway)
+```
+
+### Private Route Table
+
+Routes `0.0.0.0/0` to the NAT Gateway.
+
+```
+Destination     │ Target
+────────────────┼──────────────────
+10.0.0.0/16     │ local (within VPC)
+0.0.0.0/0       │ nat-xxx (NAT Gateway)
+```
+
+```hcl
+resource "aws_route_table" "public" {
+  vpc_id = aws_vpc.main.id
+
+  route {
+    cidr_block = "0.0.0.0/0"
+    gateway_id = aws_internet_gateway.main.id
+  }
+}
+
+resource "aws_route_table" "private" {
+  vpc_id = aws_vpc.main.id
+
+  route {
+    cidr_block     = "0.0.0.0/0"
+    nat_gateway_id = aws_nat_gateway.main.id
+  }
+}
+
+resource "aws_route_table_association" "public" {
+  count          = 2
+  subnet_id      = aws_subnet.public[count.index].id
+  route_table_id = aws_route_table.public.id
+}
+
+resource "aws_route_table_association" "private" {
+  count          = 2
+  subnet_id      = aws_subnet.private[count.index].id
+  route_table_id = aws_route_table.private.id
+}
+```
+
+---
+
+## Security Groups
+
+Virtual firewall for resources. Controls inbound and outbound traffic.
+
+### Best Practices
+
+1. **Least privilege** - only open ports you need
+2. **Reference security groups, not IPs** - use `source_security_group_id`
+3. **Separate SGs per tier** - ALB SG, ECS SG, RDS SG
+
+```hcl
+# ALB Security Group - accepts traffic from internet
+resource "aws_security_group" "alb" {
+  name   = "alb-sg"
+  vpc_id = aws_vpc.main.id
+
+  ingress {
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  ingress {
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+
+# ECS Security Group - only accepts traffic from ALB
+resource "aws_security_group" "ecs" {
+  name   = "ecs-tasks-sg"
+  vpc_id = aws_vpc.main.id
+
+  ingress {
+    from_port       = 80
+    to_port         = 80
+    protocol        = "tcp"
+    security_groups = [aws_security_group.alb.id]  # Only from ALB!
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+```
+
+ECS tasks only accept traffic from ALB - not directly from internet.
+
+---
+
+## ECS Components
+
+### ECS Cluster
+
+Logical grouping of tasks and services. Just a namespace.
 
 ```hcl
 resource "aws_ecs_cluster" "main" {
   name = "my-app-cluster"
+
+  setting {
+    name  = "containerInsights"
+    value = "enabled"
+  }
 }
 ```
 
-That's it. A cluster is just a logical grouping. The magic is in the task definition.
+### Task Definition
 
-### 4. Task Definition
+The recipe. What container, how much CPU/memory, ports, logging.
 
 ```hcl
 resource "aws_ecs_task_definition" "app" {
@@ -177,76 +383,40 @@ resource "aws_ecs_task_definition" "app" {
   memory                   = "512"
   execution_role_arn       = aws_iam_role.ecs_execution.arn
 
-  container_definitions = jsonencode([
-    {
-      name      = "app"
-      image     = "${aws_ecr_repository.app.repository_url}:latest"
-      essential = true
-      portMappings = [
-        {
-          containerPort = 80
-          protocol      = "tcp"
-        }
-      ]
-    }
-  ])
-}
-```
-
-This is the "recipe" - what container, how much CPU/memory, what ports.
-
-### 5. IAM Execution Role
-
-```hcl
-resource "aws_iam_role" "ecs_execution" {
-  name = "ecs-execution-role"
-
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [{
-      Action = "sts:AssumeRole"
-      Effect = "Allow"
-      Principal = {
-        Service = "ecs-tasks.amazonaws.com"
-      }
+  container_definitions = jsonencode([{
+    name      = "app"
+    image     = "${aws_ecr_repository.app.repository_url}:latest"
+    essential = true
+    portMappings = [{
+      containerPort = 80
+      protocol      = "tcp"
     }]
-  })
-}
-
-resource "aws_iam_role_policy_attachment" "ecs_execution" {
-  role       = aws_iam_role.ecs_execution.name
-  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+  }])
 }
 ```
 
-This lets ECS pull images from ECR and write logs to CloudWatch.
+### IAM Execution Role
 
----
-
-## For Next Session
-
-- ECS Service (needs ALB)
-- ALB (Part 2)
-- ACM Certificate (Part 2)
-- Route53 (Part 2)
-
-Why? The service needs somewhere to send traffic. That's the ALB. We build the foundation first.
-
----
-
-## Homework
-
-Before Part 2:
-
-1. Review your ClickOps deployment
-2. Think about how each Console screen maps to a Terraform resource
-3. Try writing `vpc.tf` yourself - just the VPC and subnets
+Lets ECS pull images from ECR and write logs to CloudWatch. Without this, tasks can't start.
 
 ---
 
 ## Key Takeaway
 
-> Terraform is not magic. It's the same resources you clicked, written down.
+Now you understand why each component exists:
+- **VPC** - isolation
+- **Subnets** - organisation + AZ redundancy  
+- **IGW** - internet access
+- **NAT Gateway** - outbound for private resources
+- **Route Tables** - traffic direction
+- **Security Groups** - firewall
 
-If you understood ClickOps, you'll understand Terraform.
+Next week: ALB, HTTPS, DNS.
 
+---
+
+## Homework
+
+1. Draw the networking diagram for your ECS project
+2. Decide: public subnets only (cheaper) or public + private (more secure)?
+3. Look at the code in the repo
