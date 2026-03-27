@@ -227,7 +227,7 @@ Future sessions will cover:
 - Multi-environment deployments (dev/staging/prod)
 - Secrets management in pipelines
 - Advanced caching strategies
-- GitOps with ArgoCD
+- GitOps in CICD
 - Deployment strategies (blue/green, canary)
 - Infrastructure pipelines (Terraform in CI/CD)
 
