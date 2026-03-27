@@ -58,7 +58,7 @@ CD = "ship it"
 A typical pipeline has stages:
 
 ```
-Push → Build → Test → Scan → Deploy
+Push > Build > Test > Scan > Deploy
 ```
 
 Each stage:
@@ -125,7 +125,7 @@ Your pipeline YAML defines *what* to run. But it needs a machine to run *on* - t
 
 **GitHub-Hosted Runners (Free, Public)**
 - GitHub gives you runners for free out of the box
-- `runs-on: ubuntu-latest` → GitHub spins up a fresh VM, runs your job, destroys it
+- `runs-on: ubuntu-latest` > GitHub spins up a fresh VM, runs your job, destroys it
 - pre-installed tools (Docker, Node, Python, etc.)
 - ephemeral - clean slate every run, no leftover state
 - free tier: 2,000 minutes/month on free plans, more on paid
@@ -180,22 +180,34 @@ The theme is the same across all clouds: don't store static credentials. Have th
 
 ## Security Scanning in Pipelines
 
-Every pipeline should scan for vulnerabilities.
+Every pipeline should scan for vulnerabilities. You're building Docker images - you need to know if the base image or your dependencies have known CVEs before you ship them.
 
-Popular tools:
-- **Grype** (Anchore) - container and filesystem scanning
-- **Clair** (Anchore) - container vulnerability analysis  
-- **Trivy** - comprehensive scanner
+**My recommendation: use Grype or Clair.**
 
-> ⚠️ **Note on Trivy**: In March 2026, Trivy's GitHub Action was compromised in a supply chain attack. Look at:
+**Open source / free tools:**
 
-> - Pin action versions to specific SHAs
-> - Consider alternatives like Grype or Clair
-> - Review third-party actions before use
+- **Grype** (Anchore) - scans container images and filesystems against vulnerability databases. Fast, CLI-first, easy to plug into any CI pipeline. This is the one I'd recommend starting with.
+- **Clair** (Quay/Red Hat) - static analysis of container images. Originally built for Quay registry. Runs as a service you deploy rather than a CLI tool.
+- **Trivy** (Aqua Security) - was one of the most popular scanners. Covers containers, filesystems, git repos and Kubernetes manifests. **However, it got hacked in March 2026** (see below). Use with caution.
+- **Snyk** - has a free tier for open source projects. Scans containers, code dependencies and IaC. Also does license compliance.
+- **Docker Scout** - built into Docker Desktop and Docker Hub. Scans images on push. Free tier available.
 
-I think there was 1 tag maybe 0.35 that was saved. Or you can use grype.
+**Built into cloud registries:**
 
-Example with Grype:
+- **Amazon ECR Image Scanning** - ECR has built-in scanning. Basic scanning uses Clair under the hood. Enhanced scanning uses Amazon Inspector and gives you continuous monitoring, not just scan-on-push.
+- **Azure Defender for Container Registries** - scans images in ACR automatically.
+- **GCP Artifact Analysis** - scans images in Artifact Registry / GCR.
+
+The cloud-native scanners are convenient because they run automatically when you push an image. But you should also scan in your pipeline *before* pushing so you catch issues earlier.
+
+> ⚠️ **Trivy got hacked.** In March 2026, Trivy's GitHub Action was compromised in a supply chain attack. Attackers force-pushed 75 out of 76 version tags in the `aquasecurity/trivy-action` repo to deliver malware. Any pipeline referencing Trivy by version tag was executing an infostealer that dumped runner memory, harvested SSH keys and exfiltrated cloud credentials (AWS, GCP, Azure). Only tag `0.35.0` was unaffected. The full write-up is here: [Trivy Under Attack Again](https://socket.dev/blog/trivy-under-attack-again-github-actions-compromise)
+
+This is a real-world example of why you should:
+- **Pin action versions to specific commit SHAs**, not tags
+- **Consider alternatives like Grype or Clair**
+- **Review third-party actions before trusting them in your pipeline**
+
+Example with Grype in a pipeline:
 
 ```yaml
 - name: Scan image
