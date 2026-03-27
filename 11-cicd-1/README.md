@@ -26,7 +26,7 @@ Every command you run manually on your laptop - `docker build`, `docker push`, `
 
 Nothing magical. Just automation with guardrails.
 
-## The Mental Model
+## TL;DR of CICD
 
 Think of CI/CD as a robot developer who:
 - watches your repo
@@ -229,9 +229,63 @@ Things that will bite you early:
 - **Not failing on scan results** - running a security scan that doesn't fail the build on critical vulnerabilities is just a fancy log decorator. Set `fail-build: true`.
 - **No branch protection** - if anyone can push to `main` and trigger a deploy, your pipeline is a liability not a guardrail. Set up branch protection rules and require PR reviews.
 
+## Things to Think About Early
+
+We covered some of these before. 
+
+These aren't beginner topics but they'll save you pain if you think about them from the start.
+
+### Image Tagging
+
+Never use `latest` as your image tag in a pipeline. If every build pushes `my-app:latest`, you have no idea what's actually running in any environment. You can't rollback. You can't audit. You can't diff.
+
+Tag your images with the **git commit SHA**:
+
+```bash
+docker build -t my-app:${{ github.sha }} .
+docker push my-app:${{ github.sha }}
+```
+
+This gives you:
+- every image is traceable back to a specific commit
+- rollback = just redeploy the previous SHA
+- you can tell exactly what code is running in any environment
+- immutable - once built, that tag never changes
+
+You can also add supplementary tags like `my-app:main` or `my-app:v1.2.3` for convenience, but the SHA tag should always be the source of truth.
+
+### Concurrency
+
+What happens when two people merge to main within seconds of each other? Two pipelines kick off. Two deploys race. One overwrites the other. Nobody knows which version won.
+
+GitHub Actions has `concurrency` groups to handle this:
+
+```yaml
+concurrency:
+  group: deploy-prod
+  cancel-in-progress: true
+```
+
+This cancels the older run when a newer one starts. For deployments, you usually want the latest code to win. Think about this before it bites you.
+
+### CI/CD Should Own Deployments, Not Terraform
+
+This one matters a lot for ECS.
+
+A common mistake is using Terraform to manage everything including task definitions, service desired count and the image tag. This means every deploy requires a Terraform run. Your CI/CD pushes a new image but nothing actually deploys until someone runs `terraform apply`. Or worse, Terraform drifts because CI/CD updated the task definition and now `terraform plan` wants to revert it.
+
+The right split:
+
+- **Terraform** owns the infrastructure - the ECS cluster, the service, the ALB, the IAM roles, the security groups, the initial task definition
+- **CI/CD** owns the application lifecycle - building the image, updating the task definition with the new image tag and deploying it
+
+Your pipeline should call `aws ecs update-service` or `aws ecs register-task-definition` directly. Terraform should use `ignore_changes` on the task definition and image so it doesn't fight with your pipeline.
+
+This way deploys are fast (no Terraform state locking, no plan/apply cycle) and your infrastructure stays managed by IaC while your application moves at the speed of your pipeline.
+
 ## What's Coming Next
 
-This is Part 1 - foundations.
+This is Part 1 - foundations and to touch upon the more advanced parts of CICD. CICD can be simple yet so complex depending on your organisation. 
 
 Future sessions will cover:
 - **Reusable workflows & composite actions** - DRY for pipelines, think Terraform modules
