@@ -14,7 +14,7 @@ Now multiply that by a team of five.
 - "it works on my machine"
 - two people deployed at the same time and nobody knows what's running
 
-No audit trail. No consistency. Pure vibes-based deployment.
+No audit trail. No consistency. Vibes basically..
 
 This is the problem CI/CD solves.
 
@@ -282,6 +282,29 @@ The right split:
 Your pipeline should call `aws ecs update-service` or `aws ecs register-task-definition` directly. Terraform should use `ignore_changes` on the task definition and image so it doesn't fight with your pipeline.
 
 This way deploys are fast (no Terraform state locking, no plan/apply cycle) and your infrastructure stays managed by IaC while your application moves at the speed of your pipeline.
+
+### ECS Deployment Nuances Your Pipeline Needs to Handle
+
+When your CI/CD pipeline deploys to ECS, there are a few things that will catch you out if you don't think about them:
+
+**Deployment circuit breaker** - by default, if your new task definition is broken (bad image, missing env var, crash loop), ECS will just keep trying to start it forever. Your pipeline will hang or time out with no clear answer. Enable the circuit breaker and ECS will automatically detect failing tasks and rollback to the previous working version:
+
+```json
+"deploymentCircuitBreaker": {
+  "enable": true,
+  "rollback": true
+}
+```
+
+**Health checks determine if your deploy succeeded** - ECS doesn't just check "did the container start?" It waits for the new tasks to pass ALB health checks before draining the old ones. If your health check path is wrong, too slow to respond or too strict on timing, ECS will keep killing perfectly good containers. This is the #1 cause of "my deploy succeeded in the pipeline but the app is down."
+
+**Graceful shutdown** - during a rolling deploy, ECS sends SIGTERM to old containers before replacing them. If your app doesn't handle SIGTERM (finish in-flight requests, close DB connections, flush logs), those requests just get dropped. Users see 502s. The `stopTimeout` setting (default 30 seconds) controls how long ECS waits before sending SIGKILL. Make sure your app shuts down cleanly within that window.
+
+**Rolling deploy settings** - `minimumHealthyPercent` and `maximumPercent` control how aggressive your deploy is:
+- `100 / 200` - keep all old tasks running, start new ones alongside. Zero downtime but you briefly pay for double the tasks during deploy.
+- `50 / 100` - kill half the old tasks first, then start new ones. Uses fewer resources but you run at reduced capacity during deploy.
+
+Your pipeline doesn't set these directly (they're on the ECS service config) but you need to understand them because they affect how long your deploy takes and whether you get downtime.
 
 ## What's Coming Next
 
