@@ -150,10 +150,13 @@ Popular tools:
 - **Clair** (Anchore) - container vulnerability analysis  
 - **Trivy** - comprehensive scanner
 
-> ⚠️ **Note on Trivy**: In March 2025, Trivy's GitHub Action was compromised in a supply chain attack. While now remediated, this highlights why you should:
+> ⚠️ **Note on Trivy**: In March 2026, Trivy's GitHub Action was compromised in a supply chain attack. Look at:
+
 > - Pin action versions to specific SHAs
 > - Consider alternatives like Grype or Clair
 > - Review third-party actions before use
+
+I think there was 1 tag maybe 0.35 that was saved. Or you can use grype.
 
 Example with Grype:
 
