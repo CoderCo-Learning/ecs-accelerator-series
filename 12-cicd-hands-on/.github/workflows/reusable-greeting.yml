@@ -1,0 +1,65 @@
+###############################################################################
+# Reusable Workflow - Greeting Template
+#
+# This is a REUSABLE workflow. It cannot run on its own.
+# Other workflows call it using: uses: ./.github/workflows/reusable-greeting.yml
+#
+# Think of it like a Terraform module - define once, call many times.
+#
+# Key points:
+#   - Triggered by workflow_call (not push/PR/etc)
+#   - Accepts inputs (like function parameters)
+#   - Can have secrets passed to it
+#   - Lives in .github/workflows/ like any other workflow
+#
+# Why reusable workflows matter:
+#   - DRY: define your build/test/deploy logic once
+#   - Consistency: every repo uses the same pipeline pattern
+#   - Maintenance: fix a bug in one place, all callers get the fix
+#
+# Real-world examples you'd make reusable:
+#   - Docker build + push to ECR
+#   - Terraform plan + apply
+#   - Run test suite with specific setup
+#   - Notify Slack on deploy
+###############################################################################
+
+name: Reusable Greeting
+
+on:
+  workflow_call:
+    inputs:
+      name:
+        description: "Who to greet"
+        required: true
+        type: string
+      environment:
+        description: "Which environment"
+        required: false
+        type: string
+        default: "dev"
+    # Secrets can be passed from the caller workflow
+    # Uncomment if your reusable workflow needs secrets:
+    # secrets:
+    #   SOME_TOKEN:
+    #     required: true
+
+jobs:
+  greet:
+    name: Say Hello
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Greeting
+        run: |
+          echo "Hello, ${{ inputs.name }}!"
+          echo "Environment: ${{ inputs.environment }}"
+          echo "Triggered by: ${{ github.actor }}"
+          echo "Repository: ${{ github.repository }}"
+          echo "Run ID: ${{ github.run_id }}"
+
+      - name: Summary
+        run: |
+          echo "### Greeting :wave:" >> $GITHUB_STEP_SUMMARY
+          echo "**Name:** ${{ inputs.name }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Environment:** ${{ inputs.environment }}" >> $GITHUB_STEP_SUMMARY

@@ -1,0 +1,66 @@
+###############################################################################
+# PR Pipeline - Build & Scan (No Push, No Deploy)
+#
+# Triggers: pull requests targeting main
+# What it does:
+#   1. Builds the Docker image (to verify it builds)
+#   2. Runs Grype vulnerability scan
+#   3. Fails the PR if high/critical CVEs are found
+#
+# This does NOT push to ECR or deploy anything.
+# It gives the developer fast feedback: "your code builds and is secure"
+# before it ever hits main.
+#
+# Combine this with branch protection rules:
+#   Settings > Branches > Branch protection > Require status checks
+#   Add "Build & Scan" as a required check
+#   Now PRs can't merge unless this passes.
+###############################################################################
+
+name: PR - Build & Scan
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  # Note: no id-token permission needed here
+  # We're not pushing to ECR or deploying, so no AWS auth required
+  # This keeps PR pipelines fast and simple
+
+env:
+  IMAGE_NAME: my-app
+
+jobs:
+  build-and-scan:
+    name: Build & Scan
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: |
+          docker build -t ${{ env.IMAGE_NAME }}:${{ github.sha }} .
+
+      # Grype scan - the gatekeeper
+      # severity-cutoff: high means high AND critical CVEs fail the build
+      # The PR cannot merge if this fails (with branch protection enabled)
+      - name: Scan image with Grype
+        uses: anchore/scan-action@v6
+        id: scan
+        with:
+          image: "${{ env.IMAGE_NAME }}:${{ github.sha }}"
+          fail-build: "true"
+          severity-cutoff: high
+          output-format: sarif
+
+      # Upload scan results so they appear in the GitHub Security tab
+      # This gives you a nice UI to browse vulnerabilities
+      - name: Upload scan results
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: ${{ steps.scan.outputs.sarif }}

@@ -1,0 +1,100 @@
+###############################################################################
+# CI Pipeline - Build & Push to ECR
+#
+# Triggers: push to main
+# What it does:
+#   1. Checks out code
+#   2. Builds Docker image
+#   3. Tags with git commit SHA (immutable, traceable)
+#   4. Scans with Grype (fails on high/critical)
+#   5. Authenticates to AWS via OIDC (no stored keys)
+#   6. Pushes to ECR
+#
+# This pipeline does NOT deploy. Deployment is a separate workflow.
+# Separation of concerns - build and deploy are independent stages.
+###############################################################################
+
+name: CI - Build & Push
+
+on:
+  push:
+    branches: [main]
+
+# Only one build per branch at a time - latest commit wins
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+# IMPORTANT: these permissions are required for OIDC to work
+# Without id-token: write, the pipeline cannot request AWS credentials
+# Without contents: read, it cannot checkout your code
+permissions:
+  id-token: write   # Required for OIDC authentication with AWS
+  contents: read     # Required for actions/checkout
+
+env:
+  AWS_REGION: eu-west-1
+  ECR_REPOSITORY: my-app    # Change to your ECR repo name
+
+jobs:
+  build-and-push:
+    name: Build, Scan & Push
+    runs-on: ubuntu-latest
+
+    steps:
+      # Step 1: Get the code
+      # Without this, the runner is an empty VM - nothing to build
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Step 2: Build the Docker image
+      # Tag with the full commit SHA - this is your source of truth
+      - name: Build Docker image
+        run: |
+          docker build -t ${{ env.ECR_REPOSITORY }}:${{ github.sha }} .
+
+      # Step 3: Security scan with Grype BEFORE pushing
+      # If there are high/critical CVEs, we stop here - nothing gets pushed
+      # This is "shift left" - catch it in CI, not in production
+      - name: Scan image with Grype
+        uses: anchore/scan-action@v6
+        with:
+          image: "${{ env.ECR_REPOSITORY }}:${{ github.sha }}"
+          fail-build: "true"
+          severity-cutoff: high
+          output-format: table
+
+      # Step 4: Authenticate to AWS via OIDC
+      # This is where the bootstrap IAM role comes in
+      # No AWS_ACCESS_KEY_ID or AWS_SECRET_ACCESS_KEY stored anywhere
+      # The runner gets temporary credentials that expire in 1 hour
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # Step 5: Login to ECR
+      # Uses the temporary credentials from the previous step
+      - name: Login to Amazon ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # Step 6: Tag and push
+      # We tag with both the SHA (source of truth) and 'latest' (convenience)
+      # The SHA tag is immutable - that exact image maps to that exact commit
+      - name: Tag and push image to ECR
+        env:
+          ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
+        run: |
+          docker tag ${{ env.ECR_REPOSITORY }}:${{ github.sha }} \
+            $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+
+          docker tag ${{ env.ECR_REPOSITORY }}:${{ github.sha }} \
+            $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:latest
+
+          docker push $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+          docker push $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:latest
+
+          echo "### Image pushed :white_check_mark:" >> $GITHUB_STEP_SUMMARY
+          echo "**Image:** \`$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY

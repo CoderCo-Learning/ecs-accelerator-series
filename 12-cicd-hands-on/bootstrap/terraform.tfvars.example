@@ -1,0 +1,16 @@
+# Copy this to terraform.tfvars and fill in your values
+
+aws_region  = "eu-west-1"
+github_org  = "YourGitHubOrg"
+github_repo = "your-ecs-app"
+
+# IMPORTANT: scope this to your repo and branches
+# For the project, you likely want main branch deploys + PR scans
+allowed_subjects = [
+  "repo:YourGitHubOrg/your-ecs-app:ref:refs/heads/main",
+  "repo:YourGitHubOrg/your-ecs-app:pull_request",
+]
+
+ecr_repository_name         = "my-app"
+ecs_task_execution_role_name = "ecsTaskExecutionRole"
+ecs_task_role_name           = "ecsTaskRole"

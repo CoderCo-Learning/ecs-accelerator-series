@@ -1,0 +1,143 @@
+###############################################################################
+# CD Pipeline - Deploy to ECS
+#
+# Triggers: after the build workflow completes successfully on main
+# What it does:
+#   1. Authenticates to AWS via OIDC
+#   2. Downloads the current task definition from ECS
+#   3. Updates the image tag to the new commit SHA
+#   4. Registers the new task definition
+#   5. Updates the ECS service to use it
+#   6. Waits for the deployment to stabilise
+#
+# Why this is separate from build:
+#   - Build can run on PRs without deploying
+#   - Deploy only runs when code hits main
+#   - You can re-run a deploy without rebuilding
+#   - Clear audit trail: "build passed" vs "deploy succeeded"
+#
+# Why CI/CD owns this, not Terraform:
+#   Terraform owns INFRASTRUCTURE (cluster, service, ALB, IAM, security groups).
+#   CI/CD owns APPLICATION LIFECYCLE (new image → new task def → rolling deploy).
+#   If Terraform managed the task definition image tag, every deploy would need
+#   terraform apply and Terraform would fight with CI/CD over the current state.
+#   Instead, Terraform uses ignore_changes on the task definition and CI/CD
+#   handles deploys directly via the AWS API.
+###############################################################################
+
+name: CD - Deploy to ECS
+
+on:
+  workflow_run:
+    workflows: ["CI - Build & Push"]
+    types: [completed]
+    branches: [main]
+
+# Only one deploy at a time - prevents race conditions
+# If two builds finish back-to-back, only the latest deploy runs
+concurrency:
+  group: deploy-production
+  cancel-in-progress: true
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: eu-west-1
+  ECR_REPOSITORY: my-app             # Change to your ECR repo name
+  ECS_CLUSTER: my-cluster            # Change to your ECS cluster name
+  ECS_SERVICE: my-service            # Change to your ECS service name
+  CONTAINER_NAME: app                # Container name in your task definition
+
+jobs:
+  deploy:
+    name: Deploy to ECS
+    runs-on: ubuntu-latest
+    # Only deploy if the build succeeded - don't deploy broken images
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+
+    steps:
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # Get the current task definition from ECS
+      # We fetch it, update the image and register a new revision
+      # This means we never lose existing config (env vars, cpu, memory, etc.)
+      - name: Download current task definition
+        run: |
+          aws ecs describe-task-definition \
+            --task-definition ${{ env.ECS_SERVICE }} \
+            --query 'taskDefinition' \
+            --output json > task-def.json
+
+          # Clean fields that can't be in a register request
+          # ECS returns metadata fields that aren't valid for registration
+          cat task-def.json | jq 'del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy)' > clean-task-def.json
+
+      # Update the image tag in the task definition to the new commit SHA
+      - name: Update image in task definition
+        id: render-task-def
+        env:
+          ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
+        run: |
+          NEW_IMAGE="$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:${{ github.event.workflow_run.head_sha }}"
+
+          # Replace the image for our container
+          cat clean-task-def.json | jq \
+            --arg image "$NEW_IMAGE" \
+            --arg container "${{ env.CONTAINER_NAME }}" \
+            '(.containerDefinitions[] | select(.name == $container) | .image) = $image' \
+            > updated-task-def.json
+
+          echo "image=$NEW_IMAGE" >> $GITHUB_OUTPUT
+
+      # Register the new task definition revision
+      - name: Register new task definition
+        id: register-task-def
+        run: |
+          NEW_TASK_DEF_ARN=$(aws ecs register-task-definition \
+            --cli-input-json file://updated-task-def.json \
+            --query 'taskDefinition.taskDefinitionArn' \
+            --output text)
+
+          echo "arn=$NEW_TASK_DEF_ARN" >> $GITHUB_OUTPUT
+          echo "Registered: $NEW_TASK_DEF_ARN"
+
+      # Update the ECS service to use the new task definition
+      # This triggers a rolling deployment
+      - name: Update ECS service
+        run: |
+          aws ecs update-service \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --service ${{ env.ECS_SERVICE }} \
+            --task-definition ${{ steps.register-task-def.outputs.arn }} \
+            --force-new-deployment \
+            --query 'service.serviceName' \
+            --output text
+
+      # Wait for the deployment to finish
+      # This blocks until new tasks are healthy or the circuit breaker rolls back
+      # Default timeout: 10 minutes. Adjust if your app takes longer to start.
+      - name: Wait for deployment to stabilise
+        run: |
+          echo "Waiting for ECS service to stabilise..."
+          aws ecs wait services-stable \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --services ${{ env.ECS_SERVICE }}
+          echo "Deployment complete."
+
+      - name: Deployment summary
+        run: |
+          echo "### Deployment complete :rocket:" >> $GITHUB_STEP_SUMMARY
+          echo "**Cluster:** \`${{ env.ECS_CLUSTER }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Service:** \`${{ env.ECS_SERVICE }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Image:** \`${{ steps.render-task-def.outputs.image }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Task Definition:** \`${{ steps.register-task-def.outputs.arn }}\`" >> $GITHUB_STEP_SUMMARY

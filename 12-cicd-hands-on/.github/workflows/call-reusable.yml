@@ -1,0 +1,48 @@
+###############################################################################
+# Test Workflow - Calling a Reusable Workflow
+#
+# This demonstrates how to CALL a reusable workflow.
+# It's intentionally simple - just to show the pattern.
+#
+# The syntax:
+#   uses: ./.github/workflows/<filename>.yml   (same repo)
+#   uses: org/repo/.github/workflows/<file>.yml@main  (different repo)
+#
+# You can call reusable workflows from any trigger (push, PR, manual, etc.)
+###############################################################################
+
+name: Test - Call Reusable Greeting
+
+on:
+  # workflow_dispatch lets you run this manually from the GitHub Actions tab
+  # Great for testing - click "Run workflow" and fill in the inputs
+  workflow_dispatch:
+    inputs:
+      name:
+        description: "Who to greet"
+        required: true
+        default: "CoderCo"
+
+jobs:
+  # Call the reusable workflow
+  # Note: the job uses `uses:` instead of `runs-on:` + `steps:`
+  call-greeting-dev:
+    uses: ./.github/workflows/reusable-greeting.yml
+    with:
+      name: ${{ inputs.name }}
+      environment: dev
+
+  # You can call the same reusable workflow multiple times with different inputs
+  call-greeting-prod:
+    uses: ./.github/workflows/reusable-greeting.yml
+    with:
+      name: ${{ inputs.name }}
+      environment: prod
+
+  # A regular job that runs after both greetings complete
+  summary:
+    needs: [call-greeting-dev, call-greeting-prod]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Done
+        run: echo "Both greetings completed successfully!"
