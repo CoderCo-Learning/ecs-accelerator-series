@@ -226,9 +226,14 @@ If you had multiple services (api, worker, cron), you'd call the reusable workfl
 
 ### Why CI/CD Owns Deployments, Not Terraform
 
-This is worth repeating from last week because it's the most important architectural decision in this whole setup.
+This is worth repeating from last week because it's the most important architectural decision in this whole setup. If you take one thing from this session, make it this.
 
-**The wrong way:**
+#### The Common Mistake
+
+A very common pattern you'll see in tutorials and even in real companies is Terraform managing everything: the ECS cluster, the service, the ALB, the IAM roles AND the task definition including the image tag. On the surface this looks clean. One tool, one source of truth, everything in code.
+
+The problem shows up the moment you actually deploy.
+
 ```
 Developer pushes code
   → CI builds image, pushes to ECR
@@ -236,36 +241,174 @@ Developer pushes code
   → Terraform deploys the new image
 ```
 
-Problems:
-- Every deploy requires a Terraform run (slow: state lock, plan, apply)
-- Terraform drift: CI/CD updated the image, now `terraform plan` wants to revert it
-- Two systems fighting over the same resource
+This means every single application deploy requires a full Terraform run. State lock acquired, plan generated, apply executed. For a simple image tag change. That's slow, heavy and creates a bottleneck.
 
-**The right way:**
-```
-Developer pushes code
-  → CI builds image, pushes to ECR
-  → CD pipeline updates the task definition directly via AWS API
-  → CD pipeline triggers ECS rolling deployment
-  → No Terraform involved in application deploys
-```
+But the real problem is worse than slowness.
 
-**Terraform owns infrastructure.** The cluster, the service, the ALB, IAM roles, security groups, the *initial* task definition.
+#### Two Systems Cannot Manage the Same Resource
 
-**CI/CD owns the application lifecycle.** New image → new task definition revision → rolling deploy.
+Think of ECS as an orchestrator. It manages your containers, your task definitions, your deployments. It expects one system to tell it what to do at any given time. When two systems try to manage the same resource, they fight.
 
-In your Terraform, add `ignore_changes` so it doesn't fight with CI/CD:
+Here's what actually happens:
+
+1. Terraform creates the ECS service with task definition revision 1 (image `my-app:abc123`)
+2. CI/CD deploys a new image. It registers task definition revision 2 (image `my-app:def456`) and updates the service
+3. Your app is now running revision 2. Everything works
+4. A week later, someone needs to change a security group. They run `terraform plan`
+5. Terraform says: "The ECS service is using task definition revision 2 but my state says it should be revision 1. I'm going to revert it."
+6. `terraform apply` rolls your app back to the old image. Your deployment is undone
+
+This is called **drift**. Terraform's state file thinks the service should point at revision 1 because that's what Terraform last applied. CI/CD updated it to revision 2 outside of Terraform's knowledge. Now they're fighting over who controls the task definition and Terraform wins because Terraform enforces state.
+
+This gets worse with teams. Imagine five developers deploying through CI/CD throughout the day while an infrastructure engineer runs `terraform apply` for an unrelated VPC change. Every `terraform apply` potentially reverts the latest deployment. Nobody realises until someone checks why the app is running last week's code.
+
+#### The Right Way: Clear Ownership Boundaries
+
+The fix is simple. Give each tool its own domain and don't let them overlap.
+
+**Terraform (IaC) owns infrastructure.** The things that change rarely and need to be provisioned once:
+- ECS cluster
+- ECS service configuration (desired count, deployment settings, load balancer config)
+- ALB, listeners, target groups
+- IAM roles and policies
+- Security groups
+- VPC, subnets, networking
+- The *initial* task definition (to bootstrap the service)
+
+**CI/CD owns the application lifecycle.** The things that change on every push:
+- Building the Docker image
+- Tagging with the commit SHA
+- Registering a new task definition revision with the updated image
+- Updating the ECS service to use the new revision
+- Monitoring the deployment
+
+Terraform sets up the stage. CI/CD runs the show.
+
+#### lifecycle ignore_changes
+
+To make this work, you need to tell Terraform to stop managing the parts that CI/CD handles. Terraform has a `lifecycle` block with `ignore_changes` for exactly this:
 
 ```hcl
 resource "aws_ecs_service" "app" {
-  # ... your service config ...
+  name            = "my-service"
+  cluster         = aws_ecs_cluster.main.id
+  task_definition = aws_ecs_task_definition.app.arn
+  desired_count   = 2
 
-  # Let CI/CD manage the task definition - don't revert on terraform apply
+  # CI/CD manages the task definition after initial creation.
+  # Without this, terraform apply reverts every deployment CI/CD has done.
   lifecycle {
     ignore_changes = [task_definition]
   }
 }
 ```
+
+What this does: Terraform creates the service with the initial task definition. After that, it ignores any changes to the `task_definition` attribute. When CI/CD registers revision 5 and updates the service, Terraform doesn't see it as drift. `terraform plan` won't try to revert it.
+
+You might also want to ignore `desired_count` if you're using auto-scaling:
+
+```hcl
+lifecycle {
+  ignore_changes = [task_definition, desired_count]
+}
+```
+
+Without this, Terraform would revert your auto-scaled count back to whatever is hardcoded in the Terraform config every time someone runs `terraform apply`.
+
+#### What About the Task Definition Resource?
+
+You might wonder: should Terraform manage `aws_ecs_task_definition` at all?
+
+Yes, but only for the initial creation. Terraform creates revision 1 with a placeholder or initial image. After that, CI/CD takes over and registers new revisions directly through the AWS API. The task definition revisions created by CI/CD don't exist in Terraform state and that's fine. They don't need to.
+
+If you need to change something structural about the task definition (CPU, memory, log configuration, IAM role), you update it in Terraform and apply. CI/CD will pick up those changes on the next deploy because it fetches the *current* task definition from ECS, not from a file.
+
+---
+
+### Production Quirks Worth Knowing
+
+These are things that will catch you in a real production environment. They're not beginner topics but thinking about them now will save you pain later.
+
+#### Deployment Circuit Breaker
+
+By default, if your new task definition is broken (bad image, missing env var, crash loop), ECS just keeps trying to start it. Forever. Your pipeline hangs waiting for stability. The old tasks eventually get drained. Your app goes down.
+
+Enable the deployment circuit breaker in your ECS service (in Terraform):
+
+```hcl
+deployment_circuit_breaker {
+  enable   = true
+  rollback = true
+}
+```
+
+With this enabled, ECS detects that new tasks keep failing health checks and automatically rolls back to the previous working task definition. Your pipeline will report a failure (the wait step sees the rollback) but your app stays up.
+
+#### Health Check Timing
+
+ECS uses ALB health checks to decide if new tasks are healthy. If your health check is misconfigured, ECS will kill perfectly good containers.
+
+Common issues:
+- **Health check path is wrong.** You set `/health` but your app serves it at `/healthz`. ECS sees 404, marks the task as unhealthy, kills it
+- **Health check interval is too short.** Your app takes 15 seconds to start but the health check expects a response in 5 seconds. The task gets killed before it's ready
+- **Health check threshold is too strict.** One slow response and the task is marked unhealthy
+
+In your ALB target group (in Terraform):
+
+```hcl
+health_check {
+  path                = "/health"
+  interval            = 30
+  timeout             = 5
+  healthy_threshold   = 2
+  unhealthy_threshold = 3
+  matcher             = "200"
+}
+```
+
+Give your app time to start. `healthy_threshold: 2` means two consecutive healthy responses before the task is considered up. `unhealthy_threshold: 3` means three consecutive failures before it's killed. Don't make these too aggressive.
+
+#### Graceful Shutdown
+
+During a rolling deploy, ECS sends SIGTERM to old containers before killing them. If your app doesn't handle SIGTERM properly, in-flight requests get dropped. Users see 502 errors from the ALB.
+
+Your app needs to:
+1. Catch SIGTERM
+2. Stop accepting new connections
+3. Finish processing in-flight requests
+4. Close database connections
+5. Flush logs
+6. Exit cleanly
+
+The `stopTimeout` setting (default 30 seconds) controls how long ECS waits between SIGTERM and SIGKILL. If your app takes longer than 30 seconds to shut down gracefully, increase this in your task definition.
+
+Most web frameworks handle SIGTERM out of the box (Express, Flask, Go's http.Server with Shutdown). But if you're running raw processes or custom entrypoints, you need to handle it yourself.
+
+#### Rolling Deploy Settings
+
+Two settings on your ECS service control how aggressive deploys are:
+
+- `minimumHealthyPercent: 100` + `maximumPercent: 200` - keep all old tasks running, start new ones alongside. Zero downtime but you briefly pay for double the tasks during the deploy window
+- `minimumHealthyPercent: 50` + `maximumPercent: 100` - kill half the old tasks first, then start new ones. Uses fewer resources but you run at reduced capacity during the deploy
+
+For production, use 100/200. The extra cost during deploy (usually a few minutes) is worth guaranteed zero downtime. For dev/staging, 50/100 is fine to save money.
+
+#### ECS Exec for Debugging
+
+When a deploy goes wrong and you need to debug a running container, `ecs exec` lets you shell into it:
+
+```bash
+aws ecs execute-command \
+  --cluster my-cluster \
+  --task <task-id> \
+  --container app \
+  --interactive \
+  --command "/bin/sh"
+```
+
+This requires the ECS Exec feature to be enabled on your service and the task role to have SSM permissions. Set this up before you need it, not during an incident at 2am.
+
+---
 
 ### How the Deploy Works
 
