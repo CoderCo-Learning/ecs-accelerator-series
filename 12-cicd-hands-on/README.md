@@ -11,9 +11,10 @@ Episode 10:    You rebuilt it all as Terraform
 Episode 11:    You learned CI/CD concepts - what, why, how it works
 ```
 
-Last week was theory. This week we build.
+Last week was theory. This week we look at more practical stuff.
 
-By the end of this session you'll have:
+By the end of this session you'll understand how to create:
+
 - An OIDC trust between GitHub Actions and AWS (no stored keys)
 - A CI pipeline that builds, scans and pushes your Docker image
 - A CD pipeline that deploys to ECS automatically
@@ -73,13 +74,13 @@ cp terraform.tfvars.example terraform.tfvars
 Your `terraform.tfvars` should look like:
 
 ```hcl
-aws_region  = "eu-west-1"
-github_org  = "YourOrg"
+aws_region  = "eu-west-2"
+github_org  = "your_user"
 github_repo = "your-ecs-app"
 
 allowed_subjects = [
-  "repo:YourOrg/your-ecs-app:ref:refs/heads/main",
-  "repo:YourOrg/your-ecs-app:pull_request",
+  "repo:your_user/your-ecs-app:ref:refs/heads/main",
+  "repo:your_user/your-ecs-app:pull_request",
 ]
 
 ecr_repository_name         = "my-app"
@@ -109,7 +110,7 @@ After `terraform apply`, take the `role_arn` output and add it to your GitHub re
 
 This is the **only** secret your pipeline needs. And it's not even a credential - it's just telling the pipeline which role to assume. The actual authentication happens via OIDC.
 
-### The Trust Policy - Why It Matters
+### The Trust Policy - why we need this??
 
 Look at the trust policy in `bootstrap/main.tf`. The critical part is the `sub` condition:
 
@@ -139,7 +140,7 @@ The IAM policy gives the pipeline exactly what it needs and nothing more:
 | `iam:PassRole` | Let ECS use the task execution role |
 | `logs:DescribeLogGroups` | Task definition validation |
 
-No `*` on actions. No admin access. If the pipeline doesn't need it, it doesn't have it.
+No `*` on actions. No admin access. If the pipeline doesn't need it, it shouldn't have it.
 
 ---
 
@@ -150,7 +151,7 @@ File: `.github/workflows/build.yml`
 This pipeline triggers on every push to `main` and does:
 
 ```
-Checkout → Build → Scan (Grype) → Auth (OIDC) → Push to ECR
+Checkout > Build > Container Scan (Grype) > Auth (OIDC) > Push to ECR/DockerHub/GHCR etc
 ```
 
 ### The Permissions Block
