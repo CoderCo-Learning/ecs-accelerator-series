@@ -1,0 +1,66 @@
+name: CD - Deploy to ECS
+
+on:
+  workflow_run:
+    workflows: ["CI - Build & Push"]
+    types: [completed]
+    branches: [main]
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: true
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: eu-west-1
+  ECR_REPOSITORY: my-app
+  ECS_CLUSTER: my-cluster
+  ECS_SERVICE: my-service
+  CONTAINER_NAME: app
+
+jobs:
+  auth:
+    name: Authenticate to AWS
+    runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    outputs:
+      image: ${{ steps.image.outputs.uri }}
+      authenticated: ${{ steps.aws-auth.outcome }}
+
+    steps:
+      - name: Configure AWS credentials (OIDC)
+        id: aws-auth
+        uses: aws-actions/configure-aws-credentials@v4
+        continue-on-error: true
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: ecr-login
+        if: steps.aws-auth.outcome == 'success'
+        uses: aws-actions/amazon-ecr-login@v2
+        continue-on-error: true
+
+      - name: Build image URI
+        id: image
+        run: |
+          if [ "${{ steps.ecr-login.outcome }}" == "success" ]; then
+            echo "uri=${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.event.workflow_run.head_sha }}" >> $GITHUB_OUTPUT
+          else
+            echo "uri=000000000000.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPOSITORY }}:${{ github.event.workflow_run.head_sha }}" >> $GITHUB_OUTPUT
+            echo "Using placeholder image URI (no AWS credentials)"
+          fi
+
+  deploy:
+    needs: auth
+    uses: ./.github/workflows/reusable-ecs-deploy.yml
+    with:
+      cluster: my-cluster
+      service: my-service
+      container_name: app
+      image: ${{ needs.auth.outputs.image }}
+      aws_region: eu-west-1

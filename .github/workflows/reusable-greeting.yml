@@ -1,0 +1,33 @@
+name: Reusable Greeting
+
+on:
+  workflow_call:
+    inputs:
+      name:
+        description: "Who to greet"
+        required: true
+        type: string
+      environment:
+        description: "Which environment"
+        required: false
+        type: string
+        default: "dev"
+
+jobs:
+  greet:
+    name: Say Hello
+    runs-on: ubuntu-latest
+    steps:
+      - name: Greeting
+        run: |
+          echo "Hello, ${{ inputs.name }}!"
+          echo "Environment: ${{ inputs.environment }}"
+          echo "Triggered by: ${{ github.actor }}"
+          echo "Repository: ${{ github.repository }}"
+          echo "Run ID: ${{ github.run_id }}"
+
+      - name: Summary
+        run: |
+          echo "### Greeting :wave:" >> $GITHUB_STEP_SUMMARY
+          echo "**Name:** ${{ inputs.name }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Environment:** ${{ inputs.environment }}" >> $GITHUB_STEP_SUMMARY

@@ -202,6 +202,28 @@ on:
     branches: [main]
 ```
 
+The deploy pipeline has two jobs. The first job handles OIDC authentication and builds the image URI. The second job calls the **reusable ECS deploy workflow** (more on that in Part 5) which handles the actual task definition update and service rollout. This means the deploy logic is written once and can be called by any workflow in the repo.
+
+```yaml
+jobs:
+  auth:
+    # OIDC auth, ECR login, build the image URI
+    ...
+    outputs:
+      image: ${{ steps.image.outputs.uri }}
+
+  deploy:
+    needs: auth
+    uses: ./.github/workflows/reusable-ecs-deploy.yml
+    with:
+      cluster: my-cluster
+      service: my-service
+      container_name: app
+      image: ${{ needs.auth.outputs.image }}
+```
+
+If you had multiple services (api, worker, cron), you'd call the reusable workflow once per service with different inputs. One deploy pipeline, many services.
+
 ### Why CI/CD Owns Deployments, Not Terraform
 
 This is worth repeating from last week because it's the most important architectural decision in this whole setup.
@@ -315,10 +337,13 @@ Now:
 ## Part 5: Reusable Workflows
 
 Files:
-- `.github/workflows/reusable-greeting.yml` - the template
+- `.github/workflows/reusable-greeting.yml` - simple template to show the pattern
 - `.github/workflows/call-reusable.yml` - how to call it
+- `.github/workflows/reusable-ecs-deploy.yml` - real-world example used by our deploy pipeline
 
 Think of reusable workflows like Terraform modules. Define once, use everywhere.
+
+> **Important:** GitHub Actions only reads workflows from the repo root's `.github/workflows/` directory. The workflow files inside `12-cicd-hands-on/.github/workflows/` are reference examples. To actually run them, they must be in the root `.github/workflows/`. We've already copied them there for this repo.
 
 ### Defining a Reusable Workflow
 
@@ -365,9 +390,49 @@ jobs:
 
 This is powerful for organisations. You define your standard build/deploy pipelines in a shared repo and every team's repo calls them. One place to update and every repo gets the fix.
 
-### The Example
+### Real-World Example: Reusable ECS Deploy
 
-We've included a simple greeting workflow to demonstrate the pattern. Run it manually:
+The greeting example is for learning. The real payoff is `reusable-ecs-deploy.yml` which our deploy pipeline actually uses. It accepts inputs for cluster, service, container name and image, then handles the entire deploy flow:
+
+```yaml
+jobs:
+  deploy:
+    uses: ./.github/workflows/reusable-ecs-deploy.yml
+    with:
+      cluster: my-cluster
+      service: my-service
+      container_name: app
+      image: 123456.dkr.ecr.eu-west-1.amazonaws.com/my-app:abc123
+```
+
+Inside the reusable workflow, it fetches the current task definition, cleans the metadata, swaps the image, registers a new revision, updates the service and waits for stability. All the logic from Part 3, packaged as a reusable module.
+
+If you had three microservices, your deploy pipeline would call it three times:
+
+```yaml
+jobs:
+  deploy-api:
+    uses: ./.github/workflows/reusable-ecs-deploy.yml
+    with:
+      cluster: production
+      service: api
+      container_name: api
+      image: ${{ needs.auth.outputs.api_image }}
+
+  deploy-worker:
+    uses: ./.github/workflows/reusable-ecs-deploy.yml
+    with:
+      cluster: production
+      service: worker
+      container_name: worker
+      image: ${{ needs.auth.outputs.worker_image }}
+```
+
+Same deploy logic, no copy-paste.
+
+### The Greeting Example
+
+We've also included a simple greeting workflow to demonstrate the pattern. Run it manually:
 
 1. Go to Actions tab in your repo
 2. Find "Test - Call Reusable Greeting"
@@ -494,11 +559,14 @@ Every step is automated. Every image is scanned. Every deploy is traceable to a 
 └── .github/
     └── workflows/
         ├── build.yml                      ← CI: build, scan, push to ECR
-        ├── deploy.yml                     ← CD: deploy to ECS
+        ├── deploy.yml                     ← CD: deploy to ECS (calls reusable)
         ├── pr-scan.yml                    ← PR: build + Grype scan
-        ├── reusable-greeting.yml          ← Reusable workflow template
+        ├── reusable-ecs-deploy.yml        ← Reusable: ECS task def + deploy logic
+        ├── reusable-greeting.yml          ← Reusable: simple greeting template
         └── call-reusable.yml              ← Example: calling the reusable workflow
 ```
+
+These workflow files are reference copies. The runnable versions live in the repo root's `.github/workflows/` directory since that's where GitHub Actions looks for them.
 
 ---
 

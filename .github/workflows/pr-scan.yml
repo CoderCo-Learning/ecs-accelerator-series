@@ -1,0 +1,41 @@
+name: PR - Build & Scan
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  IMAGE_NAME: my-app
+
+jobs:
+  build-and-scan:
+    name: Build & Scan
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: |
+          docker build -t ${{ env.IMAGE_NAME }}:${{ github.sha }} .
+
+      - name: Scan image with Grype
+        uses: anchore/scan-action@v6
+        id: scan
+        continue-on-error: true
+        with:
+          image: "${{ env.IMAGE_NAME }}:${{ github.sha }}"
+          fail-build: "true"
+          severity-cutoff: high
+          output-format: sarif
+
+      - name: Upload scan results
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        continue-on-error: true
+        with:
+          sarif_file: ${{ steps.scan.outputs.sarif }}

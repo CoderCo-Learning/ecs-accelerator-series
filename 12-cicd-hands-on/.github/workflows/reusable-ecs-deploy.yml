@@ -1,0 +1,128 @@
+###############################################################################
+# Reusable Workflow - ECS Task Definition Update & Deploy
+#
+# This extracts the core ECS deployment logic into a reusable workflow.
+# Any repo or workflow can call this to deploy a new image to ECS.
+#
+# What it does:
+#   1. Fetches the current task definition from ECS
+#   2. Cleans metadata fields that can't be re-registered
+#   3. Swaps the container image to the new one
+#   4. Registers a new task definition revision
+#   5. Updates the ECS service
+#   6. Waits for the deployment to stabilise
+#
+# Why reusable:
+#   If you have multiple services (api, worker, cron) you call this
+#   once per service with different inputs. One deploy workflow, many services.
+###############################################################################
+
+name: Reusable ECS Deploy
+
+on:
+  workflow_call:
+    inputs:
+      cluster:
+        description: "ECS cluster name"
+        required: true
+        type: string
+      service:
+        description: "ECS service name"
+        required: true
+        type: string
+      container_name:
+        description: "Container name in the task definition"
+        required: true
+        type: string
+      image:
+        description: "Full image URI including tag (e.g. 123456.dkr.ecr.eu-west-1.amazonaws.com/my-app:abc123)"
+        required: true
+        type: string
+      aws_region:
+        description: "AWS region"
+        required: false
+        type: string
+        default: "eu-west-1"
+    outputs:
+      task_definition_arn:
+        description: "ARN of the newly registered task definition"
+        value: ${{ jobs.deploy.outputs.task_def_arn }}
+
+jobs:
+  deploy:
+    name: Deploy to ${{ inputs.cluster }}/${{ inputs.service }}
+    runs-on: ubuntu-latest
+    outputs:
+      task_def_arn: ${{ steps.register-task-def.outputs.arn }}
+
+    steps:
+      # Fetch the current task definition from ECS
+      # We always fetch live state so we don't lose env vars, CPU, memory etc.
+      - name: Download current task definition
+        run: |
+          aws ecs describe-task-definition \
+            --task-definition ${{ inputs.service }} \
+            --query 'taskDefinition' \
+            --output json > task-def.json
+
+          # Strip metadata fields that AWS returns but rejects on registration
+          cat task-def.json | jq 'del(
+            .taskDefinitionArn,
+            .revision,
+            .status,
+            .requiresAttributes,
+            .compatibilities,
+            .registeredAt,
+            .registeredBy
+          )' > clean-task-def.json
+
+      # Swap the image for the specified container
+      - name: Update image in task definition
+        run: |
+          cat clean-task-def.json | jq \
+            --arg image "${{ inputs.image }}" \
+            --arg container "${{ inputs.container_name }}" \
+            '(.containerDefinitions[] | select(.name == $container) | .image) = $image' \
+            > updated-task-def.json
+
+          echo "Updated ${{ inputs.container_name }} to ${{ inputs.image }}"
+
+      # Register a new immutable revision
+      - name: Register new task definition
+        id: register-task-def
+        run: |
+          NEW_TASK_DEF_ARN=$(aws ecs register-task-definition \
+            --cli-input-json file://updated-task-def.json \
+            --query 'taskDefinition.taskDefinitionArn' \
+            --output text)
+
+          echo "arn=$NEW_TASK_DEF_ARN" >> $GITHUB_OUTPUT
+          echo "Registered: $NEW_TASK_DEF_ARN"
+
+      # Tell ECS to use the new revision
+      - name: Update ECS service
+        run: |
+          aws ecs update-service \
+            --cluster ${{ inputs.cluster }} \
+            --service ${{ inputs.service }} \
+            --task-definition ${{ steps.register-task-def.outputs.arn }} \
+            --force-new-deployment \
+            --query 'service.serviceName' \
+            --output text
+
+      # Block until healthy or circuit breaker rolls back
+      - name: Wait for deployment to stabilise
+        run: |
+          echo "Waiting for ${{ inputs.service }} to stabilise..."
+          aws ecs wait services-stable \
+            --cluster ${{ inputs.cluster }} \
+            --services ${{ inputs.service }}
+          echo "Deployment complete."
+
+      - name: Deployment summary
+        run: |
+          echo "### Deployment complete :rocket:" >> $GITHUB_STEP_SUMMARY
+          echo "**Cluster:** \`${{ inputs.cluster }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Service:** \`${{ inputs.service }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Image:** \`${{ inputs.image }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Task Definition:** \`${{ steps.register-task-def.outputs.arn }}\`" >> $GITHUB_STEP_SUMMARY

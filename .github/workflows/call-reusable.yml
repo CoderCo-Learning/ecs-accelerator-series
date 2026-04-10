@@ -1,0 +1,29 @@
+name: Test - Call Reusable Greeting
+
+on:
+  workflow_dispatch:
+    inputs:
+      name:
+        description: "Who to greet"
+        required: true
+        default: "CoderCo"
+
+jobs:
+  call-greeting-dev:
+    uses: ./.github/workflows/reusable-greeting.yml
+    with:
+      name: ${{ inputs.name }}
+      environment: dev
+
+  call-greeting-prod:
+    uses: ./.github/workflows/reusable-greeting.yml
+    with:
+      name: ${{ inputs.name }}
+      environment: prod
+
+  summary:
+    needs: [call-greeting-dev, call-greeting-prod]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Done
+        run: echo "Both greetings completed successfully!"

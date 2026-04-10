@@ -1,0 +1,111 @@
+name: Reusable ECS Deploy
+
+on:
+  workflow_call:
+    inputs:
+      cluster:
+        description: "ECS cluster name"
+        required: true
+        type: string
+      service:
+        description: "ECS service name"
+        required: true
+        type: string
+      container_name:
+        description: "Container name in the task definition"
+        required: true
+        type: string
+      image:
+        description: "Full image URI including tag"
+        required: true
+        type: string
+      aws_region:
+        description: "AWS region"
+        required: false
+        type: string
+        default: "eu-west-1"
+    outputs:
+      task_definition_arn:
+        description: "ARN of the newly registered task definition"
+        value: ${{ jobs.deploy.outputs.task_def_arn }}
+
+jobs:
+  deploy:
+    name: Deploy to ${{ inputs.cluster }}/${{ inputs.service }}
+    runs-on: ubuntu-latest
+    outputs:
+      task_def_arn: ${{ steps.register-task-def.outputs.arn }}
+
+    steps:
+      - name: Download current task definition
+        continue-on-error: true
+        run: |
+          aws ecs describe-task-definition \
+            --task-definition ${{ inputs.service }} \
+            --query 'taskDefinition' \
+            --output json > task-def.json
+
+          cat task-def.json | jq 'del(
+            .taskDefinitionArn,
+            .revision,
+            .status,
+            .requiresAttributes,
+            .compatibilities,
+            .registeredAt,
+            .registeredBy
+          )' > clean-task-def.json
+
+      - name: Update image in task definition
+        continue-on-error: true
+        run: |
+          if [ -f clean-task-def.json ]; then
+            cat clean-task-def.json | jq \
+              --arg image "${{ inputs.image }}" \
+              --arg container "${{ inputs.container_name }}" \
+              '(.containerDefinitions[] | select(.name == $container) | .image) = $image' \
+              > updated-task-def.json
+          fi
+          echo "Would update ${{ inputs.container_name }} to ${{ inputs.image }}"
+
+      - name: Register new task definition
+        id: register-task-def
+        continue-on-error: true
+        run: |
+          if [ -f updated-task-def.json ]; then
+            NEW_TASK_DEF_ARN=$(aws ecs register-task-definition \
+              --cli-input-json file://updated-task-def.json \
+              --query 'taskDefinition.taskDefinitionArn' \
+              --output text)
+            echo "arn=$NEW_TASK_DEF_ARN" >> $GITHUB_OUTPUT
+          else
+            echo "arn=arn:aws:ecs:${{ inputs.aws_region }}:000000000000:task-definition/${{ inputs.service }}:0" >> $GITHUB_OUTPUT
+            echo "Skipped (no AWS credentials)"
+          fi
+
+      - name: Update ECS service
+        continue-on-error: true
+        run: |
+          aws ecs update-service \
+            --cluster ${{ inputs.cluster }} \
+            --service ${{ inputs.service }} \
+            --task-definition ${{ steps.register-task-def.outputs.arn }} \
+            --force-new-deployment \
+            --query 'service.serviceName' \
+            --output text
+
+      - name: Wait for deployment to stabilise
+        continue-on-error: true
+        run: |
+          echo "Waiting for ${{ inputs.service }} to stabilise..."
+          aws ecs wait services-stable \
+            --cluster ${{ inputs.cluster }} \
+            --services ${{ inputs.service }}
+          echo "Deployment complete."
+
+      - name: Deployment summary
+        run: |
+          echo "### Deployment summary :rocket:" >> $GITHUB_STEP_SUMMARY
+          echo "**Cluster:** \`${{ inputs.cluster }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Service:** \`${{ inputs.service }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Image:** \`${{ inputs.image }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Task Definition:** \`${{ steps.register-task-def.outputs.arn }}\`" >> $GITHUB_STEP_SUMMARY
