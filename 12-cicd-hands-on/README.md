@@ -186,6 +186,27 @@ concurrency:
 
 If two commits land on `main` within seconds, we don't need two builds racing. The newer commit cancels the older one. Latest code wins.
 
+### A Note on Docker Layer Caching
+
+Our build pipeline builds the image from scratch every time. This works but it's slow for large images because Docker re-downloads base layers and re-installs dependencies on every run.
+
+In production, you'd add Docker layer caching to reuse layers from previous builds. GitHub Actions supports this through `docker/build-push-action` with cache backends:
+
+```yaml
+- name: Build and push
+  uses: docker/build-push-action@v5
+  with:
+    context: .
+    push: true
+    tags: ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+    cache-from: type=gha
+    cache-to: type=gha,mode=max
+```
+
+`type=gha` uses GitHub Actions' built-in cache. First build is the same speed. Every build after that reuses unchanged layers and only rebuilds what changed. For a Node or Python app with a `package.json` or `requirements.txt` that doesn't change often, this can cut build times from minutes to seconds.
+
+We're not using this in our pipeline today to keep things simple, but it's one of the first optimisations you'd add in a real project.
+
 ---
 
 ## Part 3: The CD Pipeline - Deploy to ECS
@@ -407,6 +428,22 @@ aws ecs execute-command \
 ```
 
 This requires the ECS Exec feature to be enabled on your service and the task role to have SSM permissions. Set this up before you need it, not during an incident at 2am.
+
+#### Rollback
+
+Rollback with commit SHA tagging is simple: redeploy the previous SHA.
+
+If revision 5 (`my-app:def456`) broke something, find the last known good commit SHA and trigger a new deploy with that image. The pipeline registers revision 6 pointing at the old image. ECS rolls forward to revision 6 which runs the old code. You're not actually "rolling back" in ECS terms. You're rolling forward to a new revision that happens to use a previous image.
+
+```bash
+# Find the previous task definition's image
+aws ecs describe-task-definition --task-definition my-service:4 \
+  --query 'taskDefinition.containerDefinitions[0].image' --output text
+
+# Trigger a deploy with that image (or just rerun the pipeline for that commit)
+```
+
+The fastest approach is usually to revert the commit in git and let the pipeline do its thing. The new commit triggers a build with the reverted code, which produces an image, which gets deployed. Fully automated rollback through the same pipeline.
 
 ---
 
