@@ -1,4 +1,4 @@
-# CI/CD Part 3 - Composite Actions, Self-Hosted Runners, Secrets Management & Multi-Environment Deployments
+# CI/CD Part 3 - Self-Hosted Runners, Secrets Management & Multi-Environment Deployments
 
 ## The Journey So Far
 
@@ -12,227 +12,15 @@ Episode 11:    You learned CI/CD concepts - what, why, how it works
 Episode 12:    You built real pipelines - OIDC, build, deploy, PR scan, reusable workflows
 ```
 
-Last session we built working pipelines and introduced reusable workflows. This session we cover four topics that take your CI/CD from "it works" to "it works in production at an organisation":
+Last session we built working pipelines and introduced reusable workflows. This session we cover three topics that take your CI/CD from "it works" to "it works in production at an organisation":
 
-1. **Composite actions** - reusable step sequences (the other half of DRY pipelines)
-2. **Self-hosted runners** - running pipelines on your own infrastructure
-3. **Secrets management** - how to handle credentials properly at every layer
-4. **Multi-environment deployments** - dev to staging to prod with approval gates
-
----
-
-## Part 1: Composite Actions
-
-In Episode 12 we covered reusable workflows - entire jobs you define once and call from anywhere. Composite actions solve a different problem: **reusable steps within a job**.
-
-### Reusable Workflows vs Composite Actions
-
-| | Reusable Workflow | Composite Action |
-|---|---|---|
-| **Scope** | Entire job (gets its own runner) | Steps within a job |
-| **Trigger** | `workflow_call` | Used in a step with `uses:` |
-| **Runner** | Gets its own runner | Runs on the calling job's runner |
-| **When to use** | Complete pipelines (build, deploy, infra) | Repeated step sequences (setup, scan, notify) |
-| **Analogy** | Terraform module | Shell function |
-
-**Rule of thumb:** If you need a whole job with its own environment, use a reusable workflow. If you keep writing the same 2-3 steps in every job, use a composite action.
-
-### What Is a Composite Action?
-
-A composite action bundles multiple steps into a single reusable step. It lives in an `action.yml` file:
-
-```yaml
-# action.yml
-name: "Docker Build & Scan"
-description: "Builds a Docker image and scans it with Grype"
-
-inputs:
-  image_name:
-    description: "Name for the Docker image"
-    required: true
-  severity_cutoff:
-    description: "Minimum severity to fail on"
-    required: false
-    default: "high"
-
-outputs:
-  image_tag:
-    description: "The full image tag that was built"
-    value: ${{ steps.build.outputs.tag }}
-
-runs:
-  using: "composite"
-  steps:
-    - name: Build image
-      id: build
-      shell: bash
-      run: |
-        TAG="${{ inputs.image_name }}:${{ github.sha }}"
-        docker build -t "$TAG" .
-        echo "tag=$TAG" >> $GITHUB_OUTPUT
-
-    - name: Scan with Grype
-      uses: anchore/scan-action@v3
-      with:
-        image: ${{ steps.build.outputs.tag }}
-        fail-build: true
-        severity-cutoff: ${{ inputs.severity_cutoff }}
-```
-
-Key differences from a reusable workflow:
-- Uses `runs: using: "composite"` instead of `on: workflow_call`
-- Each `run:` step needs `shell: bash` explicitly. Without it the step fails silently. This catches everyone out.
-- It defines steps, not jobs. The steps merge into the caller's job.
-
-### Using a Composite Action
-
-```yaml
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Build and scan
-        uses: CoderCo/docker-build-scan@v1   # composite action
-        with:
-          image_name: my-app
-          severity_cutoff: critical
-
-      - name: Push to registry
-        run: docker push my-app:${{ github.sha }}
-```
-
-It sits alongside other steps. Same runner. Same filesystem. If the composite action builds a Docker image, the next step can push it because they share the same Docker daemon.
-
-### Local Composite Actions
-
-You can define composite actions inside the same repo:
-
-```
-my-repo/
-  .github/
-    actions/
-      docker-build-scan/
-        action.yml
-      aws-ecr-setup/
-        action.yml
-    workflows/
-      ci.yml
-```
-
-Reference with a relative path:
-
-```yaml
-steps:
-  - uses: actions/checkout@v4
-  - uses: ./.github/actions/docker-build-scan
-    with:
-      image_name: my-app
-```
-
-### Practical Examples
-
-**AWS OIDC + ECR login (2 steps into 1):**
-
-```yaml
-# .github/actions/aws-ecr-setup/action.yml
-name: "AWS ECR Setup"
-description: "OIDC auth to AWS and login to ECR"
-
-inputs:
-  role_arn:
-    required: true
-  aws_region:
-    required: false
-    default: "eu-west-1"
-
-outputs:
-  registry:
-    description: "ECR registry URI"
-    value: ${{ steps.ecr.outputs.registry }}
-
-runs:
-  using: "composite"
-  steps:
-    - name: Configure AWS credentials
-      uses: aws-actions/configure-aws-credentials@v4
-      with:
-        role-to-assume: ${{ inputs.role_arn }}
-        aws-region: ${{ inputs.aws_region }}
-
-    - name: Login to ECR
-      id: ecr
-      uses: aws-actions/amazon-ecr-login@v2
-```
-
-Now every workflow that needs AWS+ECR does one step instead of two:
-
-```yaml
-- uses: ./.github/actions/aws-ecr-setup
-  with:
-    role_arn: ${{ secrets.AWS_ROLE_ARN }}
-```
-
-**Slack notification:**
-
-```yaml
-# .github/actions/slack-notify/action.yml
-name: "Slack Deploy Notification"
-
-inputs:
-  status:
-    required: true
-  service:
-    required: true
-  webhook_url:
-    required: true
-
-runs:
-  using: "composite"
-  steps:
-    - name: Send notification
-      shell: bash
-      run: |
-        if [ "${{ inputs.status }}" = "success" ]; then
-          EMOJI=":white_check_mark:"
-          COLOR="good"
-        else
-          EMOJI=":x:"
-          COLOR="danger"
-        fi
-
-        curl -X POST ${{ inputs.webhook_url }} \
-          -H 'Content-type: application/json' \
-          -d "{
-            \"attachments\": [{
-              \"color\": \"$COLOR\",
-              \"text\": \"$EMOJI *${{ inputs.service }}* deploy: ${{ inputs.status }}\nCommit: \`${{ github.sha }}\`\nActor: ${{ github.actor }}\"
-            }]
-          }"
-```
-
-### When to Use What
-
-```
-"I need to standardise our entire build pipeline across 10 repos"
-  -> Reusable workflow (EP 12)
-
-"I keep writing the same 3 setup steps in every job"
-  -> Composite action
-
-"I want a single step that handles Docker build + scan + tag"
-  -> Composite action
-
-"I need to abstract away a curl + jq sequence into a clean interface"
-  -> Composite action
-```
-
-Any time you find yourself copying the same 2-3 steps across multiple jobs, that is a composite action waiting to happen.
+1. **Self-hosted runners** - running pipelines on your own infrastructure
+2. **Secrets management** - how to handle credentials properly at every layer
+3. **Multi-environment deployments** - dev to staging to prod with approval gates
 
 ---
 
-## Part 2: Self-Hosted Runners
+## Part 1: Self-Hosted Runners
 
 ### Why Self-Hosted?
 
@@ -607,7 +395,7 @@ Tools that automate this:
 
 ---
 
-## Part 3: Secrets Management
+## Part 2: Secrets Management
 
 In Episode 12 we set up OIDC so the pipeline doesn't need stored AWS keys. But secrets management goes much deeper than pipeline credentials. Your application needs database passwords, API keys, encryption keys and service tokens. How you store, access and rotate them matters.
 
@@ -911,7 +699,7 @@ No plaintext secrets in code. No long-lived keys in GitHub. Automatic rotation. 
 
 ---
 
-## Part 4: Multi-Environment Deployments
+## Part 3: Multi-Environment Deployments
 
 ### The Problem
 
@@ -1177,9 +965,6 @@ This gives you a manual trigger with an escape hatch for emergencies. The approv
 ```
 13-cicd-3/
 ├── README.md                                    <- You are here
-├── composite-actions/
-│   └── docker-build-scan/
-│       └── action.yml                           <- Example composite action
 └── .github/
     └── workflows/
         ├── self-hosted-deploy.yml               <- Deploy using self-hosted runner
@@ -1189,9 +974,6 @@ This gives you a manual trigger with an escape hatch for emergencies. The approv
 ---
 
 ## Common Issues
-
-**"Permission denied in composite action"**
-Composite actions need `shell: bash` on every `run:` step. Without it the step fails silently or with a confusing error.
 
 **"Self-hosted runner offline"**
 The runner agent crashed or the EC2 instance stopped. SSH in and check `sudo ./svc.sh status`. Common causes: disk full (Docker images), OOM kill, instance terminated by ASG.
@@ -1215,13 +997,12 @@ Check environment variables and secrets. The image is the same but config differ
 
 ## Key Takeaways
 
-1. **Composite actions = reusable steps** - bundle repeated step sequences into a clean interface. Use alongside reusable workflows (EP 12) for full DRY pipelines.
-2. **Self-hosted runners** solve VPC access, compliance, cost and performance. Use ephemeral mode for security.
-3. **Never use self-hosted runners on public repos.** Anyone can run code on your infrastructure via a PR.
-4. **Secrets have three layers** - pipeline auth (OIDC/instance profiles), infrastructure (Secrets Manager), application runtime (ECS secrets from Secrets Manager/SSM).
-5. **Never put secrets in plaintext** - not in code, not in task definitions, not in Terraform variables. Use Secrets Manager or SSM Parameter Store.
-6. **Promote images, don't rebuild** - one build, one image, promoted through dev > staging > prod. The SHA tag is your source of truth.
-7. **GitHub Environments** give you approval gates, scoped secrets and deployment branch restrictions with zero custom code.
+1. **Self-hosted runners** solve VPC access, compliance, cost and performance. Use ephemeral mode for security.
+2. **Never use self-hosted runners on public repos.** Anyone can run code on your infrastructure via a PR.
+3. **Secrets have three layers** - pipeline auth (OIDC/instance profiles), infrastructure (Secrets Manager), application runtime (ECS secrets from Secrets Manager/SSM).
+4. **Never put secrets in plaintext** - not in code, not in task definitions, not in Terraform variables. Use Secrets Manager or SSM Parameter Store.
+5. **Promote images, don't rebuild** - one build, one image, promoted through dev > staging > prod. The SHA tag is your source of truth.
+6. **GitHub Environments** give you approval gates, scoped secrets and deployment branch restrictions with zero custom code.
 
 ---
 
@@ -1236,7 +1017,6 @@ Check environment variables and secrets. The image is the same but config differ
 
 ## Resources
 
-- [Creating Composite Actions](https://docs.github.com/en/actions/sharing-automations/creating-actions/creating-a-composite-action)
 - [Self-Hosted Runners](https://docs.github.com/en/actions/hosting-your-own-runners/managing-self-hosted-runners/about-self-hosted-runners)
 - [actions-runner-controller (ARC)](https://github.com/actions/actions-runner-controller)
 - [GitHub Environments](https://docs.github.com/en/actions/managing-workflow-runs-and-deployments/managing-deployments/managing-environments-for-deployment)
