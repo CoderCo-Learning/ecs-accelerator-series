@@ -1,4 +1,4 @@
-# CI/CD Part 3 - Reusable Workflows, Composite Actions & Self-Hosted Runners
+# CI/CD Part 3 - Composite Actions, Self-Hosted Runners, Secrets Management & Multi-Environment Deployments
 
 ## The Journey So Far
 
@@ -12,224 +12,34 @@ Episode 11:    You learned CI/CD concepts - what, why, how it works
 Episode 12:    You built real pipelines - OIDC, build, deploy, PR scan, reusable workflows
 ```
 
-Last session we built working pipelines. This session we go deeper into two things that separate a hobby project pipeline from an engineering organisation's CI/CD:
+Last session we built working pipelines and introduced reusable workflows. This session we cover four topics that take your CI/CD from "it works" to "it works in production at an organisation":
 
-1. **Reusable workflows & composite actions** - how to stop copy-pasting YAML across repos
-2. **Self-hosted runners** - how to run pipelines on your own infrastructure
-
----
-
-## Why This Matters
-
-Imagine you have 15 microservices. Each one needs a CI pipeline that builds a Docker image, scans it and pushes to ECR. Each one needs a CD pipeline that deploys to ECS.
-
-Without reusability, you have 30+ workflow files across 15 repos. All slightly different. Someone fixes a bug in one, forgets to update the others. Six months later you've got 15 variations of the same pipeline and nobody knows which one is correct.
-
-This is the same problem Terraform modules solve for infrastructure. You wouldn't copy-paste 500 lines of Terraform into every project. You'd write a module and call it with different inputs. CI/CD pipelines deserve the same treatment.
+1. **Composite actions** - reusable step sequences (the other half of DRY pipelines)
+2. **Self-hosted runners** - running pipelines on your own infrastructure
+3. **Secrets management** - how to handle credentials properly at every layer
+4. **Multi-environment deployments** - dev to staging to prod with approval gates
 
 ---
 
-## Part 1: Reusable Workflows - Deep Dive
+## Part 1: Composite Actions
 
-We introduced reusable workflows in Episode 12. Now let's go deeper.
-
-### What Is a Reusable Workflow?
-
-A reusable workflow is a complete workflow file that other workflows can call. It runs as a **separate job** in the caller's pipeline. Think of it as a function that takes inputs and runs an entire job.
-
-The key trigger is `workflow_call`:
-
-```yaml
-# .github/workflows/reusable-docker-build.yml
-name: Reusable Docker Build
-
-on:
-  workflow_call:
-    inputs:
-      image_name:
-        required: true
-        type: string
-      dockerfile:
-        required: false
-        type: string
-        default: "Dockerfile"
-      context:
-        required: false
-        type: string
-        default: "."
-    secrets:
-      AWS_ROLE_ARN:
-        required: true
-    outputs:
-      image_uri:
-        description: "Full image URI with tag"
-        value: ${{ jobs.build.outputs.image }}
-
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    outputs:
-      image: ${{ steps.meta.outputs.uri }}
-    permissions:
-      id-token: write
-      contents: read
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          aws-region: eu-west-1
-
-      - name: Login to ECR
-        id: ecr
-        uses: aws-actions/amazon-ecr-login@v2
-
-      - name: Build and tag
-        run: |
-          IMAGE="${{ steps.ecr.outputs.registry }}/${{ inputs.image_name }}:${{ github.sha }}"
-          docker build -t "$IMAGE" -f ${{ inputs.dockerfile }} ${{ inputs.context }}
-          echo "uri=$IMAGE" >> $GITHUB_OUTPUT
-        id: meta
-
-      - name: Scan with Grype
-        uses: anchore/scan-action@v3
-        with:
-          image: ${{ steps.meta.outputs.uri }}
-          fail-build: true
-          severity-cutoff: high
-
-      - name: Push to ECR
-        run: docker push ${{ steps.meta.outputs.uri }}
-```
-
-### Calling a Reusable Workflow
-
-```yaml
-# .github/workflows/ci.yml
-name: CI
-
-on:
-  push:
-    branches: [main]
-
-jobs:
-  build:
-    uses: ./.github/workflows/reusable-docker-build.yml
-    with:
-      image_name: my-api
-    secrets:
-      AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
-
-  deploy:
-    needs: build
-    uses: ./.github/workflows/reusable-ecs-deploy.yml
-    with:
-      cluster: production
-      service: my-api
-      container_name: api
-      image: ${{ needs.build.outputs.image_uri }}
-```
-
-Notice the caller job has `uses:` instead of `runs-on:` + `steps:`. The entire job is delegated to the reusable workflow.
-
-### Cross-Repo Reusable Workflows
-
-This is where it gets powerful for organisations. You create a central repo with your standard workflows:
-
-```
-CoderCo/shared-workflows/
-  .github/workflows/
-    reusable-docker-build.yml
-    reusable-ecs-deploy.yml
-    reusable-terraform-plan.yml
-    reusable-terraform-apply.yml
-```
-
-Any repo in the org can call them:
-
-```yaml
-jobs:
-  build:
-    uses: CoderCo/shared-workflows/.github/workflows/reusable-docker-build.yml@main
-    with:
-      image_name: payments-api
-    secrets:
-      AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
-```
-
-The `@main` at the end is the ref (branch, tag or SHA). For production, pin to a tag:
-
-```yaml
-uses: CoderCo/shared-workflows/.github/workflows/reusable-docker-build.yml@v2.1.0
-```
-
-**One place to update, every repo gets the fix.** When you find a vulnerability in your build process or need to add a new scanning step, you update one file in the shared repo. Every team benefits immediately (or on their next pin update if they're using tags).
-
-### Reusable Workflow Constraints
-
-There are rules you need to know:
-
-| Constraint | Detail |
-|-----------|--------|
-| **Max nesting depth** | 4 levels. A workflow can call a reusable workflow, which can call another, up to 4 deep. Don't go that deep. |
-| **Max reusable workflows per file** | 20 per workflow file |
-| **env context** | Not passed down. The caller's `env:` block is not available in the reusable workflow. Pass values as inputs instead. |
-| **Secrets** | Must be explicitly passed. The reusable workflow doesn't inherit the caller's secrets unless you use `secrets: inherit`. |
-| **Concurrency** | Each reusable workflow call is a separate job. Concurrency groups apply at the caller level. |
-
-### `secrets: inherit`
-
-Instead of passing each secret individually:
-
-```yaml
-jobs:
-  build:
-    uses: ./.github/workflows/reusable-build.yml
-    secrets:
-      AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
-      SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
-      DATADOG_API_KEY: ${{ secrets.DATADOG_API_KEY }}
-```
-
-You can pass all secrets at once:
-
-```yaml
-jobs:
-  build:
-    uses: ./.github/workflows/reusable-build.yml
-    secrets: inherit
-```
-
-This is convenient but less explicit. For shared workflows across repos, explicitly declaring secrets is better because it documents what the workflow needs.
-
----
-
-## Part 2: Composite Actions - Reusable Steps
+In Episode 12 we covered reusable workflows - entire jobs you define once and call from anywhere. Composite actions solve a different problem: **reusable steps within a job**.
 
 ### Reusable Workflows vs Composite Actions
 
-This is where people get confused. Both provide reusability. The difference is **what** they encapsulate:
-
 | | Reusable Workflow | Composite Action |
 |---|---|---|
-| **Scope** | Entire job (with its own runner) | Steps within a job |
+| **Scope** | Entire job (gets its own runner) | Steps within a job |
 | **Trigger** | `workflow_call` | Used in a step with `uses:` |
-| **Runner** | Gets its own runner (or inherits via `runs-on`) | Runs on the calling job's runner |
-| **When to use** | Complete pipelines (build, deploy, infra) | Repeated sequences of steps (setup, scan, notify) |
-| **Analogy** | Terraform module | Terraform `local` block or a shell function |
+| **Runner** | Gets its own runner | Runs on the calling job's runner |
+| **When to use** | Complete pipelines (build, deploy, infra) | Repeated step sequences (setup, scan, notify) |
+| **Analogy** | Terraform module | Shell function |
 
-**Rule of thumb:** If you need a whole job with its own environment, use a reusable workflow. If you need a few steps you keep repeating inside jobs, use a composite action.
+**Rule of thumb:** If you need a whole job with its own environment, use a reusable workflow. If you keep writing the same 2-3 steps in every job, use a composite action.
 
 ### What Is a Composite Action?
 
-A composite action bundles multiple steps into a single reusable step. It's defined in an `action.yml` file.
-
-```
-my-org/docker-build-scan/
-  action.yml
-```
+A composite action bundles multiple steps into a single reusable step. It lives in an `action.yml` file:
 
 ```yaml
 # action.yml
@@ -240,10 +50,6 @@ inputs:
   image_name:
     description: "Name for the Docker image"
     required: true
-  dockerfile:
-    description: "Path to Dockerfile"
-    required: false
-    default: "Dockerfile"
   severity_cutoff:
     description: "Minimum severity to fail on"
     required: false
@@ -262,7 +68,7 @@ runs:
       shell: bash
       run: |
         TAG="${{ inputs.image_name }}:${{ github.sha }}"
-        docker build -t "$TAG" -f ${{ inputs.dockerfile }} .
+        docker build -t "$TAG" .
         echo "tag=$TAG" >> $GITHUB_OUTPUT
 
     - name: Scan with Grype
@@ -273,10 +79,10 @@ runs:
         severity-cutoff: ${{ inputs.severity_cutoff }}
 ```
 
-**Key differences from a reusable workflow:**
+Key differences from a reusable workflow:
 - Uses `runs: using: "composite"` instead of `on: workflow_call`
-- Each step needs `shell: bash` (or another shell) for `run:` commands
-- It doesn't define jobs - it defines steps that merge into the caller's job
+- Each `run:` step needs `shell: bash` explicitly. Without it the step fails silently. This catches everyone out.
+- It defines steps, not jobs. The steps merge into the caller's job.
 
 ### Using a Composite Action
 
@@ -288,7 +94,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Build and scan
-        uses: CoderCo/docker-build-scan@v1   # <-- composite action
+        uses: CoderCo/docker-build-scan@v1   # composite action
         with:
           image_name: my-app
           severity_cutoff: critical
@@ -297,11 +103,11 @@ jobs:
         run: docker push my-app:${{ github.sha }}
 ```
 
-Notice it's used as a **step** inside a job, not as a job itself. It runs on the same runner as the calling job. It shares the same filesystem, environment and context.
+It sits alongside other steps. Same runner. Same filesystem. If the composite action builds a Docker image, the next step can push it because they share the same Docker daemon.
 
 ### Local Composite Actions
 
-You can also define composite actions inside the same repo:
+You can define composite actions inside the same repo:
 
 ```
 my-repo/
@@ -309,11 +115,13 @@ my-repo/
     actions/
       docker-build-scan/
         action.yml
+      aws-ecr-setup/
+        action.yml
     workflows/
       ci.yml
 ```
 
-Reference it with a relative path:
+Reference with a relative path:
 
 ```yaml
 steps:
@@ -323,11 +131,9 @@ steps:
       image_name: my-app
 ```
 
-This is great for repo-specific reusable steps that don't need to be shared across the org.
+### Practical Examples
 
-### Real-World Composite Action Examples
-
-**Setup & Auth composite action:**
+**AWS OIDC + ECR login (2 steps into 1):**
 
 ```yaml
 # .github/actions/aws-ecr-setup/action.yml
@@ -368,12 +174,11 @@ Now every workflow that needs AWS+ECR does one step instead of two:
     role_arn: ${{ secrets.AWS_ROLE_ARN }}
 ```
 
-**Slack notification composite action:**
+**Slack notification:**
 
 ```yaml
 # .github/actions/slack-notify/action.yml
 name: "Slack Deploy Notification"
-description: "Send deployment status to Slack"
 
 inputs:
   status:
@@ -411,27 +216,23 @@ runs:
 
 ```
 "I need to standardise our entire build pipeline across 10 repos"
-  → Reusable workflow
+  -> Reusable workflow (EP 12)
 
 "I keep writing the same 3 setup steps in every job"
-  → Composite action
-
-"I need a deploy pipeline that other workflows trigger after build"
-  → Reusable workflow
+  -> Composite action
 
 "I want a single step that handles Docker build + scan + tag"
-  → Composite action
-
-"I need to run a job on a specific runner with specific permissions"
-  → Reusable workflow
+  -> Composite action
 
 "I need to abstract away a curl + jq sequence into a clean interface"
-  → Composite action
+  -> Composite action
 ```
+
+Any time you find yourself copying the same 2-3 steps across multiple jobs, that is a composite action waiting to happen.
 
 ---
 
-## Part 3: Self-Hosted Runners
+## Part 2: Self-Hosted Runners
 
 ### Why Self-Hosted?
 
@@ -445,26 +246,26 @@ GitHub-hosted runners are great. Free, ephemeral, zero maintenance. But they hav
 | **Shared infrastructure** | Compliance teams may not approve running sensitive workloads on GitHub's machines |
 | **Cost at scale** | Free tier is 2,000 mins/month. A team of 20 doing 50 builds/day burns through that in days |
 
-### When You Actually Need Self-Hosted Runners
+### When You Actually Need Them
 
 **1. VPC Access**
 
-Your pipeline needs to run `terraform plan` against an RDS instance in a private subnet. Or your integration tests hit an internal API. GitHub-hosted runners can't reach private networks.
+Your pipeline needs to run `terraform plan` against an RDS in a private subnet. Or your integration tests hit an internal API. GitHub-hosted runners can't reach private networks.
 
 ```
 GitHub-Hosted Runner                    Your AWS VPC
-       │                                     │
-       │  ──── BLOCKED ────────────────►     │  Private RDS
-       │  (no route to private subnet)       │  Internal APIs
-       │                                     │  Private ECR
+       |                                     |
+       |  ---- BLOCKED ----------------->    |  Private RDS
+       |  (no route to private subnet)       |  Internal APIs
+       |                                     |  Private ECR
 ```
 
 ```
 Self-Hosted Runner (in your VPC)        Your AWS VPC
-       │                                     │
-       │  ──── DIRECT ACCESS ──────────►     │  Private RDS
-       │  (same network)                     │  Internal APIs
-       │                                     │  Private ECR
+       |                                     |
+       |  ---- DIRECT ACCESS ----------->    |  Private RDS
+       |  (same network)                     |  Internal APIs
+       |                                     |  Private ECR
 ```
 
 **2. Compliance / Data Sovereignty**
@@ -501,29 +302,29 @@ A build that takes 8 minutes on a GitHub-hosted runner might take 2 minutes on a
 
 ```
 GitHub.com                          Your Infrastructure
-   │                                      │
-   │  1. Workflow triggered               │
-   │     (push to main)                   │
-   │                                      │
-   │  2. "Any runner with label           │
-   │      'self-hosted' available?"        │
-   │──────────────────────────────────►   │
-   │                                      │  Runner Agent
-   │  3. Runner polls GitHub,             │  (long-poll HTTPS)
-   │     picks up the job                 │
-   │◄──────────────────────────────────   │
-   │                                      │
-   │  4. Runner executes steps            │
-   │     locally, streams logs            │
-   │     back to GitHub                   │
-   │◄────────────────────────────────►   │
-   │                                      │
-   │  5. Job complete, status             │
-   │     reported back                    │
-   │◄──────────────────────────────────   │
+   |                                      |
+   |  1. Workflow triggered               |
+   |     (push to main)                   |
+   |                                      |
+   |  2. "Any runner with label           |
+   |      'self-hosted' available?"        |
+   |---------------------------------->   |
+   |                                      |  Runner Agent
+   |  3. Runner polls GitHub,             |  (long-poll HTTPS)
+   |     picks up the job                 |
+   |<----------------------------------   |
+   |                                      |
+   |  4. Runner executes steps            |
+   |     locally, streams logs            |
+   |     back to GitHub                   |
+   |<--------------------------------->  |
+   |                                      |
+   |  5. Job complete, status             |
+   |     reported back                    |
+   |<----------------------------------   |
 ```
 
-**Important:** The runner connects **outbound** to GitHub. GitHub doesn't connect inbound to your runner. This means:
+**Important:** The runner connects **outbound** to GitHub. GitHub does not connect inbound to your runner. This means:
 - No inbound firewall rules needed
 - No public IP required (just outbound HTTPS)
 - Works behind NAT, corporate firewalls, VPNs
@@ -532,7 +333,7 @@ GitHub.com                          Your Infrastructure
 
 #### Step 1: Create the EC2 Instance
 
-Use an Amazon Linux 2023 or Ubuntu 22.04 instance. `t3.medium` is a good starting point for most workloads.
+Use an Amazon Linux 2023 or Ubuntu 22.04 instance. `t3.medium` is a good starting point.
 
 Requirements:
 - Outbound internet access (HTTPS to github.com)
@@ -540,8 +341,8 @@ Requirements:
 - Security group: outbound 443 only, no inbound rules needed
 - At least 20GB EBS for Docker images
 
-```bash
-# If using Terraform (which you should be by now)
+```hcl
+# Terraform
 resource "aws_instance" "github_runner" {
   ami                    = data.aws_ami.ubuntu.id
   instance_type          = "t3.medium"
@@ -585,7 +386,7 @@ resource "aws_security_group" "runner" {
 
 #### Step 2: Install the Runner Agent
 
-SSH into the instance and run:
+SSH into the instance:
 
 ```bash
 # Create a directory for the runner
@@ -608,10 +409,9 @@ Go to your repo (or org) settings:
 - Repo: Settings > Actions > Runners > New self-hosted runner
 - Org: Settings > Actions > Runners > New self-hosted runner
 
-GitHub gives you a registration token. Run:
+GitHub gives you a registration token:
 
 ```bash
-# Configure the runner
 ./config.sh \
   --url https://github.com/CoderCo-Learning/ecs-accelerator-series \
   --token YOUR_REGISTRATION_TOKEN \
@@ -625,7 +425,7 @@ The `--labels` flag is important. Labels are how your workflows target specific 
 
 #### Step 4: Run as a Service
 
-Don't run the runner in a terminal session. It'll die when you disconnect.
+Don't run the runner in a terminal session. It dies when you disconnect.
 
 ```bash
 # Install as a systemd service
@@ -687,7 +487,7 @@ jobs:
 
 The `runs-on` array matches against runner labels. The job runs on any runner that has **all** the specified labels.
 
-### Runner Labels - Organising Your Fleet
+### Runner Labels
 
 Labels let you route jobs to the right runners:
 
@@ -709,7 +509,7 @@ You assign labels when registering the runner (`--labels`) or later in the GitHu
 
 ### Runner Groups (Organisation Level)
 
-For organisations, runner groups control which repos can use which runners:
+Runner groups control which repos can use which runners:
 
 ```
 Runner Group: "production-deployers"
@@ -723,18 +523,15 @@ Runner Group: "dev-builders"
 
 This prevents a random experimental repo from deploying to production infrastructure.
 
-### Security Considerations
+### Security
 
 Self-hosted runners come with security responsibilities that GitHub-hosted runners handle for you:
 
 **1. Runners are persistent (not ephemeral by default)**
 
-GitHub-hosted runners are destroyed after each job. Self-hosted runners keep running. This means:
-- Files from previous jobs may still be on disk
-- Docker images and layers accumulate
-- Environment variables from previous runs could leak
+GitHub-hosted runners are destroyed after each job. Self-hosted runners keep running. Files from previous jobs may still be on disk. Docker images accumulate. Environment variables from previous runs could leak.
 
-**Mitigation:** Clean up after each job:
+Clean up after each job:
 
 ```yaml
 steps:
@@ -743,61 +540,25 @@ steps:
   - name: Cleanup
     if: always()
     run: |
-      # Remove workspace files
       rm -rf $GITHUB_WORKSPACE/*
-      # Prune Docker
       docker system prune -af --volumes
 ```
 
-Or better, use **ephemeral runners** (covered below).
+Or better, use ephemeral runners (below).
 
-**2. Don't use self-hosted runners on public repos**
+**2. Never use self-hosted runners on public repos**
 
-Anyone can open a PR against a public repo. If your workflow runs on PRs and uses a self-hosted runner, an attacker can submit a PR with a workflow that runs arbitrary code on your runner. That runner is in your VPC. Bad.
+Anyone can open a PR against a public repo. If your workflow runs on PRs using a self-hosted runner, an attacker can submit a PR with a workflow that runs arbitrary code on your runner. That runner is in your VPC. Bad.
 
 **Rule:** Self-hosted runners on **private repos only**. For public repos, use GitHub-hosted runners.
 
 **3. Least privilege IAM**
 
-If the runner has an IAM instance profile, scope it tightly:
+If the runner has an IAM instance profile, scope it tightly. Don't give the runner admin access "because it's easier." That is a compromised runner away from a full account takeover.
 
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Effect": "Allow",
-      "Action": [
-        "ecr:GetAuthorizationToken",
-        "ecr:BatchGetImage",
-        "ecr:GetDownloadUrlForLayer",
-        "ecr:PutImage",
-        "ecr:InitiateLayerUpload",
-        "ecr:UploadLayerPart",
-        "ecr:CompleteLayerUpload",
-        "ecr:BatchCheckLayerAvailability"
-      ],
-      "Resource": "*"
-    },
-    {
-      "Effect": "Allow",
-      "Action": [
-        "ecs:RegisterTaskDefinition",
-        "ecs:UpdateService",
-        "ecs:DescribeServices",
-        "ecs:DescribeTaskDefinition"
-      ],
-      "Resource": "*"
-    }
-  ]
-}
-```
+### Ephemeral Runners
 
-Don't give the runner admin access "because it's easier." That's a compromised runner away from a full account takeover.
-
-### Ephemeral Runners (JIT)
-
-The gold standard for self-hosted runner security. An ephemeral runner handles exactly one job and then de-registers itself:
+The gold standard for self-hosted runner security. An ephemeral runner handles exactly one job then de-registers itself:
 
 ```bash
 ./config.sh \
@@ -806,90 +567,608 @@ The gold standard for self-hosted runner security. An ephemeral runner handles e
   --ephemeral
 ```
 
-After the job completes, the runner process exits and removes itself from GitHub. For the next job, you need to spin up a new runner.
+After the job completes, the runner process exits and removes itself from GitHub. For the next job, you spin up a new one.
 
 This is how organisations run self-hosted runners at scale:
 
 ```
-Job queued → Auto-scaling group launches EC2 → Runner registers →
-Job runs → Runner de-registers → EC2 terminates
+Job queued -> ASG launches EC2 -> Runner registers ->
+Job runs -> Runner de-registers -> EC2 terminates
 ```
+
+```
+GitHub webhook                    Your Infrastructure
+    |                                    |
+    |  "workflow_job queued"              |
+    |------------------------------>     |  Lambda / EventBridge
+    |                                    |
+    |                                    |  Launches EC2 from AMI
+    |                                    |  (pre-baked with Docker, AWS CLI, etc.)
+    |                                    |
+    |                                    |  EC2 starts runner agent
+    |  Runner picks up job               |  with --ephemeral flag
+    |<------------------------------     |
+    |                                    |
+    |  Job runs, completes               |
+    |------------------------------>     |
+    |                                    |  Runner exits
+    |                                    |  EC2 terminates
+```
+
+This gives you:
+- VPC access and custom tooling (self-hosted benefits)
+- Clean environment every run (GitHub-hosted benefits)
+- Cost efficiency (only pay for compute during jobs)
 
 Tools that automate this:
 - **actions-runner-controller (ARC)** - Kubernetes-based auto-scaling for GitHub Actions runners
 - **Philips terraform-aws-github-runner** - Terraform module for auto-scaling EC2 runners
 - **GitHub's own larger runners** - GitHub-managed but with more resources and static IPs
 
-### Ephemeral Runners with Auto-Scaling (Conceptual)
+---
+
+## Part 3: Secrets Management
+
+In Episode 12 we set up OIDC so the pipeline doesn't need stored AWS keys. But secrets management goes much deeper than pipeline credentials. Your application needs database passwords, API keys, encryption keys and service tokens. How you store, access and rotate them matters.
+
+### The Layers of Secrets
+
+There are three distinct layers where secrets live in a CI/CD setup:
 
 ```
-GitHub webhook                    Your Infrastructure
-    │                                    │
-    │  "workflow_job queued"              │
-    │──────────────────────────────►     │  Lambda / EventBridge
-    │                                    │
-    │                                    │  Launches EC2 from AMI
-    │                                    │  (pre-baked with Docker, AWS CLI, etc.)
-    │                                    │
-    │                                    │  EC2 starts runner agent
-    │  Runner picks up job               │  with --ephemeral flag
-    │◄──────────────────────────────     │
-    │                                    │
-    │  Job runs, completes               │
-    │──────────────────────────────►     │
-    │                                    │  Runner exits
-    │                                    │  EC2 terminates
-    │                                    │
+Layer 1: Pipeline Secrets
+  "How does my pipeline authenticate to AWS/Docker Hub/Slack?"
+  -> GitHub Actions Secrets, OIDC, runner IAM roles
+
+Layer 2: Infrastructure Secrets
+  "How does Terraform get the RDS password to create the database?"
+  -> Terraform variables, SSM Parameter Store, Secrets Manager
+
+Layer 3: Application Secrets
+  "How does my running container get the database connection string?"
+  -> ECS task definition secrets, Secrets Manager, SSM Parameter Store
 ```
 
-This gives you the best of both worlds:
-- VPC access and custom tooling (self-hosted benefits)
-- Clean environment every run (GitHub-hosted benefits)
-- Cost efficiency (only pay for compute during jobs)
+Each layer has different requirements for access control, rotation and audit.
+
+### Layer 1: Pipeline Secrets
+
+We covered this in Episode 12. Quick recap:
+
+**Bad:** Long-lived AWS access keys stored in GitHub Secrets.
+
+**Good:** OIDC. The pipeline assumes an IAM role and gets temporary credentials that expire in an hour.
+
+**Best (with self-hosted runners):** IAM instance profile on the runner. No secrets stored anywhere. The runner's EC2 instance has an IAM role attached. AWS CLI and SDKs pick up credentials automatically from the instance metadata service. No OIDC needed. No secrets in GitHub at all.
+
+```yaml
+# GitHub-hosted runner (needs OIDC)
+steps:
+  - uses: aws-actions/configure-aws-credentials@v4
+    with:
+      role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+      aws-region: eu-west-1
+
+# Self-hosted runner (IAM instance profile - no auth step needed)
+steps:
+  - name: Deploy
+    run: aws ecs update-service ...   # Just works. Credentials from instance profile.
+```
+
+This is one of the underrated benefits of self-hosted runners. Your pipeline has zero secrets. The IAM role is attached to the EC2 instance. Nothing to leak, nothing to rotate, nothing stored in GitHub.
+
+### Layer 2: Infrastructure Secrets (Terraform)
+
+When Terraform creates a database, it needs to set a password. Where does that password come from?
+
+**Bad: Hardcoded in Terraform**
+
+```hcl
+resource "aws_db_instance" "main" {
+  master_password = "supersecret123"    # Don't do this
+}
+```
+
+This ends up in your Terraform state file (in plaintext) and your git history (forever).
+
+**Bad: terraform.tfvars**
+
+```hcl
+# terraform.tfvars
+db_password = "supersecret123"
+```
+
+Better than hardcoding but still ends up in state. And someone will commit the tfvars file eventually.
+
+**Good: Generate and store in Secrets Manager**
+
+```hcl
+resource "random_password" "db" {
+  length  = 32
+  special = true
+}
+
+resource "aws_secretsmanager_secret" "db_password" {
+  name = "my-app/db-password"
+}
+
+resource "aws_secretsmanager_secret_version" "db_password" {
+  secret_id     = aws_secretsmanager_secret.db_password.id
+  secret_string = random_password.db.result
+}
+
+resource "aws_db_instance" "main" {
+  master_password = random_password.db.result
+}
+```
+
+Terraform generates a random password, stores it in Secrets Manager and uses it for the RDS instance. The password is still in the Terraform state file (known limitation) but never in your code or git history.
+
+**Terraform state file security:** Since state contains secrets in plaintext, your state backend must be encrypted. If you are using S3:
+
+```hcl
+terraform {
+  backend "s3" {
+    bucket         = "my-terraform-state"
+    key            = "prod/terraform.tfstate"
+    region         = "eu-west-1"
+    encrypt        = true
+    dynamodb_table = "terraform-locks"
+  }
+}
+```
+
+The `encrypt = true` enables server-side encryption on the S3 object. Use a KMS key for additional control over who can decrypt the state.
+
+### Layer 3: Application Secrets (Runtime)
+
+This is the most important layer. Your running containers need secrets at runtime.
+
+#### Option A: Environment Variables in Task Definition (Bad)
+
+```json
+"environment": [
+  {
+    "name": "DATABASE_URL",
+    "value": "postgres://admin:supersecret123@my-db.cluster-xxx.eu-west-1.rds.amazonaws.com:5432/myapp"
+  }
+]
+```
+
+The password is in plaintext in the task definition. Anyone with ECS read access can see it. It shows up in the AWS console, in `aws ecs describe-task-definition` output, in CloudWatch logs if your app prints its config on startup.
+
+#### Option B: AWS Secrets Manager (Recommended)
+
+```json
+"secrets": [
+  {
+    "name": "DATABASE_URL",
+    "valueFrom": "arn:aws:secretsmanager:eu-west-1:123456789:secret:my-app/database-url"
+  }
+]
+```
+
+ECS pulls the secret from Secrets Manager at container startup. The value never appears in the task definition. The container sees it as a normal environment variable.
+
+Requirements:
+- The ECS task execution role needs `secretsmanager:GetSecretValue` permission
+- The secret must exist before the task starts
+
+Terraform setup:
+
+```hcl
+resource "aws_secretsmanager_secret" "db_url" {
+  name = "my-app/database-url"
+}
+
+resource "aws_iam_role_policy" "ecs_secrets" {
+  role = aws_iam_role.ecs_task_execution.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = ["secretsmanager:GetSecretValue"]
+        Resource = [aws_secretsmanager_secret.db_url.arn]
+      }
+    ]
+  })
+}
+```
+
+In the task definition:
+
+```hcl
+resource "aws_ecs_task_definition" "app" {
+  container_definitions = jsonencode([
+    {
+      name  = "api"
+      image = "123456.dkr.ecr.eu-west-1.amazonaws.com/my-app:latest"
+      secrets = [
+        {
+          name      = "DATABASE_URL"
+          valueFrom = aws_secretsmanager_secret.db_url.arn
+        }
+      ]
+    }
+  ])
+}
+```
+
+#### Option C: SSM Parameter Store
+
+Similar to Secrets Manager but cheaper and simpler for non-sensitive config:
+
+```json
+"secrets": [
+  {
+    "name": "API_ENDPOINT",
+    "valueFrom": "arn:aws:ssm:eu-west-1:123456789:parameter/my-app/api-endpoint"
+  }
+]
+```
+
+SSM Parameter Store has two tiers:
+- **Standard** - free, up to 10,000 parameters, 4KB max
+- **Advanced** - $0.05/parameter/month, 8KB max, parameter policies (expiration, notification)
+
+Use Parameter Store for config values (API endpoints, feature flags, non-secret settings). Use Secrets Manager for actual secrets (passwords, API keys, tokens).
+
+#### Secrets Manager vs SSM Parameter Store
+
+| | Secrets Manager | SSM Parameter Store |
+|---|---|---|
+| **Cost** | $0.40/secret/month + $0.05/10k API calls | Free (Standard) or $0.05/param/month (Advanced) |
+| **Rotation** | Built-in automatic rotation with Lambda | Manual (you build rotation yourself) |
+| **Max size** | 64KB | 4KB (Standard) / 8KB (Advanced) |
+| **Cross-account** | Native support via resource policy | Requires IAM role assumption |
+| **Best for** | Database creds, API keys, anything that needs rotation | Config values, feature flags, endpoints |
+
+### Secret Rotation
+
+Secrets that never change are secrets waiting to be compromised. Secrets Manager supports automatic rotation:
+
+```hcl
+resource "aws_secretsmanager_secret_rotation" "db" {
+  secret_id           = aws_secretsmanager_secret.db_password.id
+  rotation_lambda_arn = aws_lambda_function.rotate_db_password.arn
+
+  rotation_rules {
+    automatically_after_days = 30
+  }
+}
+```
+
+How rotation works for RDS:
+
+1. Secrets Manager invokes a Lambda function
+2. Lambda creates a new password in the database
+3. Lambda updates the secret in Secrets Manager with the new password
+4. Next time ECS starts a new task, it picks up the new password
+
+For existing running tasks, you need to restart them to pick up the rotated secret. ECS does not hot-reload secrets. A rolling deploy (force new deployment) handles this.
+
+AWS provides pre-built rotation Lambda functions for common services (RDS, Redshift, DocumentDB). For custom secrets you write your own Lambda.
+
+### SOPS (Secrets OPerationS)
+
+SOPS is a tool by Mozilla for encrypting secret files in git. Unlike the approaches above, SOPS lets you keep encrypted secrets alongside your code:
+
+```yaml
+# secrets.enc.yaml (encrypted - safe to commit)
+database_url: ENC[AES256_GCM,data:abc123...,iv:xyz...]
+api_key: ENC[AES256_GCM,data:def456...,iv:uvw...]
+sops:
+  kms:
+    - arn: arn:aws:kms:eu-west-1:123456789:key/my-key-id
+```
+
+You encrypt with a KMS key. Only people/roles with access to that KMS key can decrypt.
+
+```bash
+# Encrypt a file
+sops --encrypt --kms arn:aws:kms:eu-west-1:123456789:key/my-key secrets.yaml > secrets.enc.yaml
+
+# Decrypt (requires KMS access)
+sops --decrypt secrets.enc.yaml
+
+# Edit in place (decrypts, opens editor, re-encrypts on save)
+sops secrets.enc.yaml
+```
+
+SOPS is useful when:
+- You want secrets versioned in git (encrypted)
+- You want to diff secret changes in PRs (you can see which keys changed, not the values)
+- You don't want to depend on Secrets Manager for everything
+
+Your pipeline can decrypt SOPS files and inject them into the deployment process. The runner needs access to the KMS key (via IAM role or OIDC).
+
+### The Full Picture
+
+```
+Pipeline Authentication
+  Self-hosted runner: IAM instance profile (no secrets stored)
+  GitHub-hosted runner: OIDC (temporary credentials)
+
+Infrastructure Provisioning
+  Terraform generates passwords with random_password
+  Stores them in Secrets Manager
+  State file encrypted in S3 with KMS
+
+Application Runtime
+  ECS task definition references Secrets Manager ARNs
+  ECS pulls secrets at container startup
+  Container sees normal environment variables
+  Secrets Manager rotates passwords on a schedule
+
+Non-secret Config
+  SSM Parameter Store for endpoints, feature flags, region settings
+  Referenced the same way in task definitions
+```
+
+No plaintext secrets in code. No long-lived keys in GitHub. Automatic rotation. Audit trail in CloudTrail.
 
 ---
 
-## Part 4: Putting It Together - An Organisation's CI/CD
+## Part 4: Multi-Environment Deployments
 
-Here's how a real organisation might structure their CI/CD using everything we've covered across Episodes 11-13:
+### The Problem
+
+So far we have been deploying to a single environment. Push to main, build, deploy. In reality you have multiple environments:
 
 ```
-CoderCo/
-├── shared-workflows/                    ← Central repo
-│   └── .github/workflows/
-│       ├── reusable-docker-build.yml    ← Build, scan, push
-│       ├── reusable-ecs-deploy.yml      ← ECS task def + deploy
-│       └── reusable-terraform.yml       ← Plan + apply
-│
-├── shared-actions/                      ← Central repo
-│   ├── aws-ecr-setup/
-│   │   └── action.yml                   ← Composite: OIDC + ECR login
-│   ├── slack-notify/
-│   │   └── action.yml                   ← Composite: Slack notifications
-│   └── docker-build-scan/
-│       └── action.yml                   ← Composite: Build + Grype scan
-│
-├── infra/                               ← Terraform repo
-│   ├── modules/
-│   │   └── github-runner/               ← Runner infrastructure module
-│   ├── environments/
-│   │   ├── dev/
-│   │   └── prod/
-│   └── .github/workflows/
-│       └── terraform.yml                ← Calls shared reusable-terraform
-│
-├── api-service/                         ← Application repo
-│   └── .github/workflows/
-│       ├── ci.yml                       ← Calls shared reusable-docker-build
-│       └── deploy.yml                   ← Calls shared reusable-ecs-deploy
-│
-└── payments-service/                    ← Another application repo
-    └── .github/workflows/
-        ├── ci.yml                       ← Same shared workflows
-        └── deploy.yml                   ← Same shared workflows, different inputs
+dev       ->    staging    ->    production
+(wild west)    (pre-prod)       (here be users)
 ```
 
-Every application repo has tiny workflow files that just pass inputs to shared workflows. The build and deploy logic is written once. Runners in the VPC handle deployments. Composite actions handle repeated setup steps.
+Each environment needs:
+- Its own ECS cluster (or service)
+- Its own set of secrets and config
+- Its own deployment rules
+- Different levels of approval
+
+### GitHub Environments
+
+GitHub Actions has a built-in concept of **environments**. They give you:
+- **Protection rules** - require approvals before deploying
+- **Wait timers** - enforce a delay before deployment starts
+- **Environment secrets** - secrets scoped to a specific environment
+- **Deployment branches** - restrict which branches can deploy to an environment
+
+Set them up in your repo: Settings > Environments
+
+```
+Environment: "dev"
+  No protection rules
+  Secrets: AWS_ROLE_ARN (dev account role)
+
+Environment: "staging"
+  Required reviewers: none
+  Wait timer: 0
+  Secrets: AWS_ROLE_ARN (staging account role)
+
+Environment: "production"
+  Required reviewers: @team-leads
+  Wait timer: 5 minutes
+  Deployment branches: main only
+  Secrets: AWS_ROLE_ARN (production account role)
+```
+
+### The Deployment Pipeline
+
+```yaml
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.build.outputs.uri }}
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and push
+        id: build
+        run: |
+          # ... build, scan, push to ECR ...
+          echo "uri=$ECR_REGISTRY/my-app:${{ github.sha }}" >> $GITHUB_OUTPUT
+
+  deploy-dev:
+    needs: build
+    uses: ./.github/workflows/reusable-ecs-deploy.yml
+    with:
+      cluster: dev
+      service: my-api
+      container_name: api
+      image: ${{ needs.build.outputs.image }}
+    secrets: inherit
+
+  deploy-staging:
+    needs: deploy-dev
+    uses: ./.github/workflows/reusable-ecs-deploy.yml
+    with:
+      cluster: staging
+      service: my-api
+      container_name: api
+      image: ${{ needs.build.outputs.image }}
+    secrets: inherit
+
+  deploy-production:
+    needs: deploy-staging
+    uses: ./.github/workflows/reusable-ecs-deploy.yml
+    with:
+      cluster: production
+      service: my-api
+      container_name: api
+      image: ${{ needs.build.outputs.image }}
+    secrets: inherit
+```
+
+This deploys the **same image** through all environments. The image built from the commit SHA is what runs in dev, staging and production. No rebuilding per environment.
+
+### Adding Approval Gates
+
+The real power is in GitHub Environments with protection rules:
+
+```yaml
+  deploy-production:
+    needs: deploy-staging
+    runs-on: ubuntu-latest
+    environment: production          # <-- This triggers the approval gate
+    steps:
+      - name: Deploy
+        run: echo "Deploying to production..."
+```
+
+When the pipeline reaches `deploy-production`, GitHub pauses and sends a notification to the required reviewers. The job sits in "Waiting" state until someone approves (or it times out).
+
+```
+build -> deploy-dev -> deploy-staging -> [APPROVAL GATE] -> deploy-production
+                                              |
+                                              |  "Deploy #42 to production?"
+                                              |  Requested by @engineer
+                                              |  [Approve] [Reject]
+```
+
+This is configured entirely in the GitHub UI (Settings > Environments > production > Required reviewers). The workflow just references `environment: production` and GitHub handles the rest.
+
+### Environment-Specific Configuration
+
+Each environment has different config. The cleanest pattern is to use environment-level secrets and variables:
+
+```yaml
+  deploy-staging:
+    needs: deploy-dev
+    runs-on: ubuntu-latest
+    environment: staging
+    steps:
+      - name: Configure AWS
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}    # staging-specific role
+          aws-region: ${{ vars.AWS_REGION }}              # staging-specific region
+
+      - name: Deploy
+        run: |
+          aws ecs update-service \
+            --cluster ${{ vars.ECS_CLUSTER }} \
+            --service ${{ vars.ECS_SERVICE }} \
+            --task-definition ...
+```
+
+`secrets.AWS_ROLE_ARN` resolves to the staging account's role because the job has `environment: staging`. Same workflow code, different values per environment.
+
+### Multi-Account Architecture
+
+In production organisations, each environment is a separate AWS account:
+
+```
+AWS Organisation
+  |
+  |-- Dev Account (111111111111)
+  |     ECS cluster: dev
+  |     ECR: shared (or per-account)
+  |
+  |-- Staging Account (222222222222)
+  |     ECS cluster: staging
+  |     ECR: shared (or per-account)
+  |
+  |-- Production Account (333333333333)
+  |     ECS cluster: production
+  |     ECR: shared (or per-account)
+  |
+  |-- Shared Services Account (444444444444)
+        ECR: central image registry
+        GitHub Runner infrastructure
+```
+
+Each account has its own OIDC trust and IAM role. The pipeline assumes a different role per environment:
+
+```yaml
+  deploy-staging:
+    environment: staging
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::222222222222:role/github-deploy
+          aws-region: eu-west-1
+```
+
+Benefits:
+- Blast radius is contained. A misconfigured dev deploy can't touch production.
+- IAM policies are account-scoped. The dev role can't access production resources.
+- Cost tracking per environment is automatic (per-account billing).
+- Compliance teams can apply different controls per account.
+
+### Promotion vs Rebuild
+
+There are two approaches to multi-environment deployments. One is correct.
+
+**Rebuild per environment (wrong):**
+```
+Push to main -> Build image -> Deploy to dev
+                Build image -> Deploy to staging    (different image!)
+                Build image -> Deploy to production  (different image!)
+```
+
+Each environment gets a different image built from the same code. But "same code" does not mean "same image." Build environments can vary. Dependencies can resolve differently. You are not testing what you deploy.
+
+**Promote the same image (correct):**
+```
+Push to main -> Build image once -> Deploy to dev (image:abc123)
+                                 -> Deploy to staging (image:abc123)
+                                 -> Deploy to production (image:abc123)
+```
+
+One build. One image. Promoted through environments. The image you tested in staging is the exact image running in production. Byte for byte identical.
+
+This is why we tag with the commit SHA. The image `my-app:abc123` is immutable. It is the same everywhere.
+
+If images need to be in per-account ECR repositories, use ECR cross-account replication or ECR pull-through cache rather than rebuilding.
+
+### Rollback in Multi-Environment
+
+Rollback works the same as single-environment (Episode 12). Find the last known good commit SHA, trigger a deploy with that image. The pipeline promotes it through the environments.
+
+For production emergencies, you might want a fast-path that skips dev and staging:
+
+```yaml
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Image tag (commit SHA) to deploy"
+        required: true
+      skip_lower_envs:
+        description: "Skip dev and staging (emergency only)"
+        type: boolean
+        default: false
+
+jobs:
+  deploy-dev:
+    if: ${{ !inputs.skip_lower_envs }}
+    # ...
+
+  deploy-staging:
+    if: ${{ !inputs.skip_lower_envs }}
+    needs: deploy-dev
+    # ...
+
+  deploy-production:
+    needs: deploy-staging
+    if: always() && (needs.deploy-staging.result == 'success' || inputs.skip_lower_envs)
+    environment: production
+    # ...
+```
+
+This gives you a manual trigger with an escape hatch for emergencies. The approval gate on production still applies.
 
 ---
 
@@ -897,67 +1176,71 @@ Every application repo has tiny workflow files that just pass inputs to shared w
 
 ```
 13-cicd-3/
-├── README.md                                    ← You are here
+├── README.md                                    <- You are here
 ├── composite-actions/
 │   └── docker-build-scan/
-│       └── action.yml                           ← Example composite action
+│       └── action.yml                           <- Example composite action
 └── .github/
     └── workflows/
-        ├── reusable-docker-build.yml            ← Reusable: build, scan, push
-        ├── call-reusable-docker-build.yml        ← Example caller workflow
-        └── self-hosted-deploy.yml               ← Deploy using self-hosted runner
+        ├── self-hosted-deploy.yml               <- Deploy using self-hosted runner
+        └── multi-env-deploy.yml                 <- Multi-environment deployment pipeline
 ```
 
 ---
 
 ## Common Issues
 
-**"Reusable workflow not found"**
-The reusable workflow must be in `.github/workflows/` at the repo root (or the ref you specify for cross-repo). It can't be in a subdirectory outside of `.github/workflows/`.
-
-**"Required input not provided"**
-Check that every `required: true` input in the reusable workflow has a matching `with:` in the caller. Typos in input names are the usual culprit.
+**"Permission denied in composite action"**
+Composite actions need `shell: bash` on every `run:` step. Without it the step fails silently or with a confusing error.
 
 **"Self-hosted runner offline"**
 The runner agent crashed or the EC2 instance stopped. SSH in and check `sudo ./svc.sh status`. Common causes: disk full (Docker images), OOM kill, instance terminated by ASG.
 
 **"Job queued but never starts"**
-No runner matches the labels in `runs-on`. Check that your runner has all the labels the workflow requires. Labels are AND-matched, not OR-matched.
-
-**"Permission denied in composite action"**
-Composite actions run `run:` steps but need `shell: bash` (or `shell: sh`) specified explicitly. Without it, the step fails silently or with a confusing error.
+No runner matches the labels in `runs-on`. Labels are AND-matched. The runner needs all the labels the workflow requires.
 
 **"Secrets not available in reusable workflow"**
-You need to either pass secrets explicitly with `secrets:` or use `secrets: inherit`. The reusable workflow must also declare the secrets it expects in the `on.workflow_call.secrets` block.
+Pass secrets explicitly with `secrets:` or use `secrets: inherit`. The reusable workflow must declare expected secrets in `on.workflow_call.secrets`.
+
+**"Secret not found in ECS task"**
+The ECS task execution role needs `secretsmanager:GetSecretValue` permission for the specific secret ARN. Check the role policy. Make sure the secret ARN matches exactly.
+
+**"Deployment waiting for approval but nobody got notified"**
+Check that required reviewers are set in Settings > Environments > production. Reviewers must have write access to the repo.
+
+**"Same image tag in dev and prod but different behaviour"**
+Check environment variables and secrets. The image is the same but config differs per environment. Verify that environment-scoped secrets and variables are set correctly.
 
 ---
 
 ## Key Takeaways
 
-1. **Reusable workflows = reusable jobs** - define entire pipelines once, call them from any workflow or repo with different inputs
-2. **Composite actions = reusable steps** - bundle repeated step sequences into a single clean step
-3. **Use both together** - reusable workflows for the pipeline structure, composite actions for common step patterns within them
-4. **Self-hosted runners** solve VPC access, compliance, cost and performance problems that GitHub-hosted runners can't
-5. **Ephemeral runners** give you self-hosted benefits with GitHub-hosted security (clean environment every run)
-6. **Never use self-hosted runners on public repos** - anyone can submit a PR that runs code on your infrastructure
-7. **Labels and groups** let you route jobs to the right runners and control access
+1. **Composite actions = reusable steps** - bundle repeated step sequences into a clean interface. Use alongside reusable workflows (EP 12) for full DRY pipelines.
+2. **Self-hosted runners** solve VPC access, compliance, cost and performance. Use ephemeral mode for security.
+3. **Never use self-hosted runners on public repos.** Anyone can run code on your infrastructure via a PR.
+4. **Secrets have three layers** - pipeline auth (OIDC/instance profiles), infrastructure (Secrets Manager), application runtime (ECS secrets from Secrets Manager/SSM).
+5. **Never put secrets in plaintext** - not in code, not in task definitions, not in Terraform variables. Use Secrets Manager or SSM Parameter Store.
+6. **Promote images, don't rebuild** - one build, one image, promoted through dev > staging > prod. The SHA tag is your source of truth.
+7. **GitHub Environments** give you approval gates, scoped secrets and deployment branch restrictions with zero custom code.
 
 ---
 
 ## What's Coming Next
 
-- Multi-environment deployments (dev > staging > prod with approval gates)
 - Infrastructure pipelines (Terraform plan/apply in CI/CD)
 - Advanced deployment strategies (blue/green, canary)
 - GitOps patterns
+- Local pipeline testing with `act`
 
 ---
 
 ## Resources
 
-- [GitHub Actions Reusable Workflows](https://docs.github.com/en/actions/sharing-automations/reusing-workflows)
 - [Creating Composite Actions](https://docs.github.com/en/actions/sharing-automations/creating-actions/creating-a-composite-action)
 - [Self-Hosted Runners](https://docs.github.com/en/actions/hosting-your-own-runners/managing-self-hosted-runners/about-self-hosted-runners)
 - [actions-runner-controller (ARC)](https://github.com/actions/actions-runner-controller)
+- [GitHub Environments](https://docs.github.com/en/actions/managing-workflow-runs-and-deployments/managing-deployments/managing-environments-for-deployment)
+- [AWS Secrets Manager](https://docs.aws.amazon.com/secretsmanager/latest/userguide/intro.html)
+- [SSM Parameter Store](https://docs.aws.amazon.com/systems-manager/latest/userguide/systems-manager-parameter-store.html)
+- [SOPS](https://github.com/getsops/sops)
 - [Philips Terraform AWS GitHub Runner](https://github.com/philips-labs/terraform-aws-github-runner)
-- [GitHub Larger Runners](https://docs.github.com/en/actions/using-github-hosted-runners/using-larger-runners)
