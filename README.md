@@ -14,3 +14,5 @@ The aim is to cover core portions of the ECS projects hence the name "ECS Accele
 - [EP 9: ClickOps First](09-clickops/README.md)
 - [EP 10: Terraform ECS Part 1](10-terraform-ecs-part-1/README.md)
 - [EP 11: CI/CD Part 1](11-cicd-1/README.md)
+- [EP 12: CI/CD Part 2 - Hands-On](12-cicd-hands-on/README.md)
+- [EP 13: CI/CD Part 3 - Reusable Workflows, Composite Actions & Self-Hosted Runners](13-cicd-3/README.md)

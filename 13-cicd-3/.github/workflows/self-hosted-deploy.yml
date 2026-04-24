@@ -1,0 +1,115 @@
+name: Deploy via Self-Hosted Runner
+
+# Example: deploying to ECS using a self-hosted runner in the VPC
+# The runner has direct access to private resources (RDS, internal APIs)
+# and an IAM instance profile for AWS access (no OIDC needed)
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment"
+        required: true
+        type: choice
+        options:
+          - dev
+          - staging
+          - production
+      image_tag:
+        description: "Image tag to deploy (commit SHA)"
+        required: true
+        type: string
+
+concurrency:
+  group: deploy-${{ inputs.environment }}
+  cancel-in-progress: false    # Don't cancel in-flight deploys
+
+jobs:
+  deploy:
+    name: Deploy to ${{ inputs.environment }}
+    # ---------------------------------------------------------------
+    # runs-on targets self-hosted runners by label
+    # This job only runs on runners that have ALL these labels
+    # ---------------------------------------------------------------
+    runs-on: [self-hosted, linux, deploy, "${{ inputs.environment }}"]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # No OIDC step needed - the runner's IAM instance profile
+      # provides AWS credentials automatically
+
+      - name: Get current task definition
+        id: current
+        run: |
+          aws ecs describe-task-definition \
+            --task-definition my-api-${{ inputs.environment }} \
+            --query 'taskDefinition' \
+            --output json > task-def.json
+
+          # Strip metadata fields that can't be in a register call
+          jq 'del(
+            .taskDefinitionArn,
+            .revision,
+            .status,
+            .requiresAttributes,
+            .compatibilities,
+            .registeredAt,
+            .registeredBy
+          )' task-def.json > clean-task-def.json
+
+      - name: Update image tag
+        run: |
+          ECR_REGISTRY=$(aws ecr describe-repositories \
+            --repository-names my-api \
+            --query 'repositories[0].repositoryUri' \
+            --output text | sed 's|/my-api||')
+
+          IMAGE="${ECR_REGISTRY}/my-api:${{ inputs.image_tag }}"
+
+          jq --arg image "$IMAGE" \
+            '(.containerDefinitions[] | select(.name == "api") | .image) = $image' \
+            clean-task-def.json > updated-task-def.json
+
+          echo "Deploying image: $IMAGE"
+
+      - name: Register new task definition
+        id: register
+        run: |
+          NEW_ARN=$(aws ecs register-task-definition \
+            --cli-input-json file://updated-task-def.json \
+            --query 'taskDefinition.taskDefinitionArn' \
+            --output text)
+          echo "arn=$NEW_ARN" >> $GITHUB_OUTPUT
+          echo "Registered: $NEW_ARN"
+
+      - name: Update ECS service
+        run: |
+          aws ecs update-service \
+            --cluster ${{ inputs.environment }} \
+            --service my-api \
+            --task-definition ${{ steps.register.outputs.arn }} \
+            --force-new-deployment
+
+      - name: Wait for deployment to stabilise
+        run: |
+          echo "Waiting for service to stabilise..."
+          aws ecs wait services-stable \
+            --cluster ${{ inputs.environment }} \
+            --services my-api
+          echo "Deployment complete."
+
+      - name: Cleanup workspace
+        if: always()
+        run: |
+          rm -f task-def.json clean-task-def.json updated-task-def.json
+
+      - name: Deployment summary
+        if: always()
+        run: |
+          echo "### Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "**Environment:** \`${{ inputs.environment }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Image tag:** \`${{ inputs.image_tag }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Task definition:** \`${{ steps.register.outputs.arn }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Runner:** \`${{ runner.name }}\`" >> $GITHUB_STEP_SUMMARY
