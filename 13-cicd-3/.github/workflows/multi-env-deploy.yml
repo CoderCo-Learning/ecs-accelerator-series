@@ -1,0 +1,181 @@
+name: Multi-Environment Deploy
+
+# Deploys the same image through dev -> staging -> production
+# Uses GitHub Environments for approval gates and scoped secrets
+# Calls the reusable ECS deploy workflow from Episode 12
+
+on:
+  push:
+    branches: [main]
+
+  # Manual trigger with emergency skip option
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Image tag (commit SHA) to deploy. Leave empty to build from HEAD."
+        required: false
+        type: string
+      skip_lower_envs:
+        description: "Skip dev and staging (emergency production rollback only)"
+        type: boolean
+        default: false
+
+concurrency:
+  group: deploy-pipeline
+  cancel-in-progress: false    # Don't cancel in-flight deploys
+
+jobs:
+  # -----------------------------------------------------------------
+  # Build once. This image is what runs in every environment.
+  # -----------------------------------------------------------------
+  build:
+    if: ${{ !inputs.image_tag }}    # Skip build if image tag provided manually
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.build.outputs.uri }}
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: eu-west-1
+
+      - name: Login to ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push
+        id: build
+        run: |
+          IMAGE="${{ steps.ecr.outputs.registry }}/my-app:${{ github.sha }}"
+          docker build -t "$IMAGE" .
+          docker push "$IMAGE"
+          echo "uri=$IMAGE" >> $GITHUB_OUTPUT
+
+  # -----------------------------------------------------------------
+  # Resolve the image URI (from build or manual input)
+  # -----------------------------------------------------------------
+  resolve-image:
+    needs: build
+    if: always()
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.resolve.outputs.uri }}
+    steps:
+      - name: Resolve image
+        id: resolve
+        run: |
+          if [ -n "${{ inputs.image_tag }}" ]; then
+            # Manual input - construct the URI
+            echo "uri=${{ secrets.ECR_REGISTRY }}/my-app:${{ inputs.image_tag }}" >> $GITHUB_OUTPUT
+          else
+            # From build job
+            echo "uri=${{ needs.build.outputs.image }}" >> $GITHUB_OUTPUT
+          fi
+
+  # -----------------------------------------------------------------
+  # Dev - no approval, auto-deploy
+  # -----------------------------------------------------------------
+  deploy-dev:
+    needs: resolve-image
+    if: ${{ !inputs.skip_lower_envs }}
+    uses: ./.github/workflows/reusable-ecs-deploy.yml
+    with:
+      cluster: dev
+      service: my-api
+      container_name: api
+      image: ${{ needs.resolve-image.outputs.image }}
+    secrets: inherit
+
+  # -----------------------------------------------------------------
+  # Staging - no approval, runs after dev succeeds
+  # -----------------------------------------------------------------
+  deploy-staging:
+    needs: [resolve-image, deploy-dev]
+    if: ${{ !inputs.skip_lower_envs }}
+    uses: ./.github/workflows/reusable-ecs-deploy.yml
+    with:
+      cluster: staging
+      service: my-api
+      container_name: api
+      image: ${{ needs.resolve-image.outputs.image }}
+    secrets: inherit
+
+  # -----------------------------------------------------------------
+  # Production - requires approval via GitHub Environment
+  # Runs after staging, or directly if skip_lower_envs is true
+  # -----------------------------------------------------------------
+  deploy-production:
+    needs: [resolve-image, deploy-staging]
+    if: always() && (needs.deploy-staging.result == 'success' || inputs.skip_lower_envs)
+    runs-on: ubuntu-latest
+    environment: production    # <-- triggers approval gate
+
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}    # production-specific role
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Get current task definition
+        run: |
+          aws ecs describe-task-definition \
+            --task-definition my-api \
+            --query 'taskDefinition' \
+            --output json > task-def.json
+
+          jq 'del(
+            .taskDefinitionArn,
+            .revision,
+            .status,
+            .requiresAttributes,
+            .compatibilities,
+            .registeredAt,
+            .registeredBy
+          )' task-def.json > clean-task-def.json
+
+      - name: Update image
+        run: |
+          jq --arg image "${{ needs.resolve-image.outputs.image }}" \
+            '(.containerDefinitions[] | select(.name == "api") | .image) = $image' \
+            clean-task-def.json > updated-task-def.json
+
+      - name: Register and deploy
+        run: |
+          NEW_ARN=$(aws ecs register-task-definition \
+            --cli-input-json file://updated-task-def.json \
+            --query 'taskDefinition.taskDefinitionArn' \
+            --output text)
+
+          aws ecs update-service \
+            --cluster ${{ vars.ECS_CLUSTER }} \
+            --service my-api \
+            --task-definition "$NEW_ARN" \
+            --force-new-deployment
+
+          echo "Waiting for service to stabilise..."
+          aws ecs wait services-stable \
+            --cluster ${{ vars.ECS_CLUSTER }} \
+            --services my-api
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "### Production Deployment" >> $GITHUB_STEP_SUMMARY
+          echo "**Image:** \`${{ needs.resolve-image.outputs.image }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Cluster:** \`${{ vars.ECS_CLUSTER }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Triggered by:** ${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Skip lower envs:** ${{ inputs.skip_lower_envs || 'false' }}" >> $GITHUB_STEP_SUMMARY
